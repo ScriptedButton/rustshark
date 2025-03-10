@@ -23,7 +23,14 @@ function startRustBackend() {
   // Use cargo run with port 8080
   const rustProcess = spawn(
     "cargo",
-    ["run", "--", "--port", BACKEND_PORT.toString(), "--interface", "en0"],
+    [
+      "run",
+      "--",
+      "--port",
+      BACKEND_PORT.toString(),
+      "--interface",
+      "\\Device\\NPF_{B87B6B5D-08BE-44C4-BB4D-9BD86A469D07}",
+    ],
     {
       cwd: backendPath,
       stdio: "pipe", // Pipe the output so we can log it

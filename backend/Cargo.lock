@@ -1757,6 +1757,7 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
+ "parking_lot",
  "pcap",
  "pnet",
  "pnet_datalink",

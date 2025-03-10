@@ -1,17 +1,22 @@
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
-use log::{info, error, debug};
-use pcap::{Device, Capture, Active};
+use log::{info, warn, error, debug, trace};
+use pcap::{Device, Capture, Active, DeviceFlags};
 use pnet_datalink::interfaces;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use chrono::{DateTime, Utc};
+use std::process::Command;
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
+use parking_lot::RwLock;
 
 use crate::models::config::AppConfig;
 use crate::models::packet::{Packet, PacketSummary};
 use crate::models::stats::CaptureStats;
+use crate::models::interface::InterfaceInfo;
 use crate::capture::parser::PacketParser;
 
 /// Manages packet capture operations
@@ -36,6 +41,12 @@ pub struct CaptureManager {
     
     /// Shared statistics
     shared_stats: Option<Arc<tokio::sync::Mutex<CaptureStats>>>,
+    
+    /// Cached interface info - to avoid repeated expensive calls
+    cached_interfaces: RwLock<Option<(Vec<InterfaceInfo>, Instant)>>,
+    
+    /// Cache duration for interfaces (in seconds)
+    interface_cache_duration: u64,
 }
 
 impl CaptureManager {
@@ -49,15 +60,207 @@ impl CaptureManager {
             next_id: AtomicU64::new(1),
             capture_task: None,
             shared_stats: None,
+            cached_interfaces: RwLock::new(None),
+            interface_cache_duration: 60, // Cache interface results for 60 seconds
         }
     }
     
-    /// List available network interfaces
+    /// A safer way to get interfaces that doesn't panic on Windows
+    fn get_interfaces_safe() -> Vec<String> {
+        // Try to get interfaces from pnet_datalink, but don't panic if it fails
+        match std::panic::catch_unwind(|| {
+            pnet_datalink::interfaces()
+                .into_iter()
+                .map(|i| i.name)
+                .collect::<Vec<String>>()
+        }) {
+            Ok(interfaces) => interfaces,
+            Err(_) => {
+                // Fallback to pcap's Device::list() which is more reliable on Windows
+                info!("Failed to get interfaces from pnet_datalink, falling back to pcap");
+                match pcap::Device::list() {
+                    Ok(devices) => devices.into_iter().map(|d| d.name).collect(),
+                    Err(e) => {
+                        error!("Failed to get interfaces from pcap: {}", e);
+                        Vec::new() // Return empty list as last resort
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Modify list_interfaces to use our safer method
     pub fn list_interfaces(&self) -> Vec<String> {
-        interfaces()
-            .into_iter()
-            .map(|i| i.name)
-            .collect()
+        #[cfg(target_os = "windows")]
+        {
+            info!("Using safe interface listing method on Windows");
+            Self::get_interfaces_safe()
+        }
+        
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On non-Windows platforms, use the original code
+            self.get_interface_info()
+                .into_iter()
+                .map(|info| info.device_name)
+                .collect()
+        }
+    }
+    
+    /// Get detailed information about available network interfaces
+    pub fn get_interface_info(&self) -> Vec<InterfaceInfo> {
+        // Check if we have a valid cached result
+        {
+            let cached = self.cached_interfaces.read();
+            if let Some((interfaces, timestamp)) = &*cached {
+                let elapsed = timestamp.elapsed();
+                if elapsed < Duration::from_secs(self.interface_cache_duration) {
+                    info!("Using cached interface list ({} interfaces, {}s old)", 
+                         interfaces.len(), elapsed.as_secs());
+                    return interfaces.clone();
+                }
+            }
+        }
+        
+        // If we don't have cached data or it's expired, fetch new data
+        let interfaces = self.fetch_interface_info();
+        
+        // Cache the result
+        {
+            let mut cache = self.cached_interfaces.write();
+            *cache = Some((interfaces.clone(), Instant::now()));
+        }
+        
+        interfaces
+    }
+    
+    /// Windows-specific method to get detailed network interfaces
+    #[cfg(target_os = "windows")]
+    fn get_windows_detailed_interfaces() -> Vec<InterfaceInfo> {
+        info!("Attempting to get detailed interfaces using PowerShell");
+        
+        let mut interfaces = Vec::new();
+        
+        // First, try to get Npcap interfaces with device names
+        if let Ok(output) = Command::new("powershell")
+            .args(&["-Command", "Get-NetAdapter | Select-Object -Property Name, InterfaceDescription, InterfaceGuid, Status, MacAddress | ConvertTo-Json"])
+            .output() 
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            
+            // Try to parse as JSON (this might be an array or single object)
+            if stdout.contains("InterfaceGuid") {
+                if let Ok(adapters) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    let adapters_arr = if adapters.is_array() {
+                        adapters.as_array().unwrap().to_owned()
+                    } else {
+                        vec![adapters]
+                    };
+                    
+                    for adapter in adapters_arr {
+                        if let (Some(guid), Some(name)) = (
+                            adapter.get("InterfaceGuid").and_then(|v| v.as_str()),
+                            adapter.get("Name").and_then(|v| v.as_str())
+                        ) {
+                            let device_name = format!("\\Device\\NPF_{}", guid);
+                            let mut info = InterfaceInfo::new(device_name);
+                            
+                            info.friendly_name = Some(name.to_string());
+                            info.description = adapter.get("InterfaceDescription")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                                
+                            info.mac_address = adapter.get("MacAddress")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                                
+                            info.is_up = adapter.get("Status")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s == "Up")
+                                .unwrap_or(true);
+                                
+                            interfaces.push(info);
+                        }
+                    }
+                }
+            }
+            
+            // Now try to get IP addresses and match them to the interfaces
+            if let Ok(ip_output) = Command::new("powershell")
+                .args(&["-Command", "Get-NetIPAddress -AddressFamily IPv4 | Select-Object -Property InterfaceAlias, IPAddress | ConvertTo-Json"])
+                .output() 
+            {
+                let ip_stdout = String::from_utf8_lossy(&ip_output.stdout);
+                
+                if let Ok(ip_data) = serde_json::from_str::<serde_json::Value>(&ip_stdout) {
+                    let ip_arr = if ip_data.is_array() {
+                        ip_data.as_array().unwrap().to_owned()
+                    } else {
+                        vec![ip_data]
+                    };
+                    
+                    for ip_info in ip_arr {
+                        if let (Some(alias), Some(ip)) = (
+                            ip_info.get("InterfaceAlias").and_then(|v| v.as_str()),
+                            ip_info.get("IPAddress").and_then(|v| v.as_str())
+                        ) {
+                            // Find the interface with this alias as friendly_name
+                            for iface in &mut interfaces {
+                                if let Some(name) = &iface.friendly_name {
+                                    if name == alias {
+                                        iface.ipv4_address = Some(ip.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        info!("PowerShell found {} detailed interfaces", interfaces.len());
+        interfaces
+    }
+    
+    /// Windows-specific method to get network interfaces using PowerShell (old version)
+    #[cfg(target_os = "windows")]
+    fn get_windows_interfaces() -> Vec<String> {
+        info!("Attempting to get interfaces using PowerShell");
+        
+        // Try to get Npcap interfaces using PowerShell
+        match Command::new("powershell")
+            .args(&["-Command", "Get-NetAdapter | ForEach-Object { \"\\Device\\NPF_\" + $_.InterfaceGuid }"])
+            .output() 
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let interfaces: Vec<String> = stdout
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                
+                info!("PowerShell found interfaces: {:?}", interfaces);
+                interfaces
+            },
+            Err(e) => {
+                warn!("Failed to execute PowerShell command: {}", e);
+                Vec::new()
+            }
+        }
+    }
+    
+    /// Placeholder for detailed interface info on non-Windows platforms
+    #[cfg(not(target_os = "windows"))]
+    fn get_windows_detailed_interfaces() -> Vec<InterfaceInfo> {
+        Vec::new()
+    }
+    
+    /// Placeholder for non-Windows platforms
+    #[cfg(not(target_os = "windows"))]
+    fn get_windows_interfaces() -> Vec<String> {
+        Vec::new()
     }
     
     /// Start packet capture
@@ -69,181 +272,305 @@ impl CaptureManager {
         
         // Get interface from config or find default
         let interface_name = match &self.config.interface {
-            Some(name) => name.clone(),
+            Some(name) => {
+                info!("Using specified interface: {}", name);
+                name.clone()
+            },
             None => {
-                let default_device = Device::lookup()?
-                    .ok_or_else(|| anyhow!("No default device found"))?;
-                default_device.name
+                info!("No interface specified, trying to find a default one");
+                return Err(anyhow!("No interface specified. Please select an interface first."));
             }
         };
         
         info!("Starting capture on interface: {}", interface_name);
         
-        // Find the requested device
-        let device = Device::list()?
-            .into_iter()
-            .find(|d| d.name == interface_name)
-            .ok_or_else(|| anyhow!("Interface {} not found", interface_name))?;
-        
-        // Create a capture handle
-        let mut capture = Capture::from_device(device)?
-            .promisc(self.config.promiscuous)
-            .snaplen(65535)
-            .timeout(1000);
-        
-        // Activate the capture
-        let mut active_capture = capture.open()?;
-        
-        // Apply filter if specified
-        if let Some(filter) = &self.config.filter {
-            active_capture.filter(filter.as_str(), true)?;
-        }
-        
-        // Reset statistics
-        self.stats = CaptureStats::default();
-        self.stats.start_time = Some(Utc::now());
-        
-        // Create channel for packet processing
-        let (tx, mut rx) = mpsc::channel(100);
-        
-        // Clone data for the capture task
-        let packets = self.packets.clone();
-        let config = self.config.clone();
-        
-        // Create shared stats using Arc and Mutex for thread-safety
-        let stats = Arc::new(tokio::sync::Mutex::new(self.stats.clone()));
-        let stats_clone = stats.clone();
-        
-        // Set running flag
-        self.is_running.store(true, Ordering::SeqCst);
-        
-        // Launch background task for capture
-        let interface_name_clone = interface_name.clone();
-        let capture_task = tokio::spawn(async move {
-            Self::run_capture(active_capture, tx, interface_name_clone).await;
-        });
-        
-        // Launch background task for packet processing
-        let process_task = tokio::spawn(async move {
-            let parser = PacketParser::new();
-            
-            while let Some((raw_data, timestamp)) = rx.recv().await {
-                info!("Received packet data: {} bytes", raw_data.len());
-                
-                // Parse the packet
-                match parser.parse_packet(raw_data.clone(), &interface_name) {
-                    Ok(mut packet) => {
-                        // Generate ID and set timestamp
-                        let id = Self::generate_id(&packets);
-                        packet.id = id;
-                        packet.timestamp = timestamp;
-                        
-                        info!("Parsed packet: {} - {} bytes, protocol: {}", 
-                             id, packet.length, packet.protocol);
-                        
-                        // Store the packet
-                        packets.insert(id, packet.clone());
-                        
-                        // Maintain buffer size limit by removing oldest packets if needed
-                        Self::enforce_buffer_limit(&packets, config.buffer_size);
-                        
-                        // Update statistics with a lock
-                        let mut stats = stats_clone.lock().await;
-                        stats.total_packets += 1;
-                        stats.total_bytes += raw_data.len();
-                        
-                        // Update protocol statistics
-                        let protocol = packet.protocol.clone();
-                        *stats.protocols.entry(protocol).or_insert(0) += 1;
-                        
-                        // Update source and destination statistics
-                        if let Some(src) = packet.source_ip {
-                            *stats.sources.entry(src.to_string()).or_insert(0) += 1;
-                        }
-                        
-                        if let Some(dst) = packet.destination_ip {
-                            *stats.destinations.entry(dst.to_string()).or_insert(0) += 1;
-                        }
-                        
-                        // Calculate rates
-                        if let Some(start) = stats.start_time {
-                            let elapsed = timestamp.signed_duration_since(start);
-                            let seconds = elapsed.num_seconds() as f64;
-                            if seconds > 0.0 {
-                                stats.packet_rate = stats.total_packets as f64 / seconds;
-                                stats.data_rate = stats.total_bytes as f64 / seconds;
-                            }
-                        }
+        // First, try to find the device in the device list to get the fully configured device
+        info!("Attempting to find device in device list first");
+        let device_opt = match Device::list() {
+            Ok(devices) => {
+                // Find the matching device by name
+                let found_device = devices.into_iter()
+                    .find(|d| d.name == interface_name);
+                    
+                match found_device {
+                    Some(device) => {
+                        info!("Found device in device list: {}", device.name);
+                        Some(device)
                     },
-                    Err(e) => {
-                        error!("Failed to parse packet: {}", e);
-                        // Update error count
-                        let mut stats = stats_clone.lock().await;
-                        stats.errors += 1;
+                    None => {
+                        warn!("Device not found in device list, will create manually");
+                        None
                     }
                 }
+            },
+            Err(e) => {
+                warn!("Failed to list devices: {}, will create device manually", e);
+                None
             }
-        });
+        };
         
-        // Store the capture task handle
-        self.capture_task = Some(capture_task);
+        // If we couldn't find the device in the list, create it manually
+        let device = match device_opt {
+            Some(device) => {
+                info!("Using device from device list");
+                device
+            },
+            None => {
+                // Create a device manually as fallback
+                info!("Attempting to open device directly: {}", interface_name);
+                
+                // Create a device manually and try to open it directly
+                #[cfg(target_os = "windows")]
+                let device = pcap::Device { 
+                    name: interface_name.clone(), 
+                    desc: None,
+                    // These fields are only needed for newer versions of the pcap crate
+                    addresses: Vec::new(),
+                    flags: DeviceFlags::empty()
+                };
+                
+                // For non-Windows platforms, create a simpler device
+                #[cfg(not(target_os = "windows"))]
+                let device = pcap::Device { 
+                    name: interface_name.clone(), 
+                    desc: None 
+                };
+                
+                device
+            }
+        };
         
-        // Also store a reference to the shared stats
-        self.shared_stats = Some(stats);
+        // Create a capture handle with specific error handling
+        info!("Creating capture from device: {}", device.name);
+        let capture_result = Capture::from_device(device);
         
-        Ok(())
+        match capture_result {
+            Ok(mut capture) => {
+                info!("Successfully created capture from device");
+                
+                // Configure the capture with step-by-step debugging
+                // In pcap API, these methods return a new capture object directly
+                info!("Configuring capture - setting promiscuous mode: {}", self.config.promiscuous);
+                
+                // Need to handle each configuration step individually to track where the crash might be happening
+                info!("Setting promiscuous mode");
+                capture = capture.promisc(self.config.promiscuous);
+                info!("Promiscuous mode set successfully");
+                
+                info!("Setting snaplen to 65535 bytes");
+                capture = capture.snaplen(65535);
+                info!("Snaplen set successfully");
+                
+                info!("Setting timeout to 1000ms");
+                capture = capture.timeout(1000);
+                info!("Timeout set successfully");
+                
+                // Try to activate the capture with detailed logging
+                info!("Attempting to activate capture");
+                match capture.open() {
+                    Ok(mut active_capture) => {
+                        info!("Successfully opened and activated capture");
+                        
+                        // Apply filter if specified
+                        if let Some(filter) = &self.config.filter {
+                            info!("Applying filter: {}", filter);
+                            match active_capture.filter(filter.as_str(), true) {
+                                Ok(_) => info!("Filter applied successfully: {}", filter),
+                                Err(e) => warn!("Failed to apply filter: {}", e)
+                            }
+                        }
+                        
+                        // Reset statistics
+                        self.stats = CaptureStats::default();
+                        self.stats.start_time = Some(Utc::now());
+                        
+                        // Create channel for packet processing
+                        let (tx, mut rx) = mpsc::channel(100);
+                        
+                        // Clone data for the capture task
+                        let packets = self.packets.clone();
+                        let config = self.config.clone();
+                        
+                        // Create shared stats using Arc and Mutex for thread-safety
+                        let stats = Arc::new(tokio::sync::Mutex::new(self.stats.clone()));
+                        let stats_clone = stats.clone();
+                        
+                        // Set running flag
+                        self.is_running.store(true, Ordering::SeqCst);
+                        
+                        // Launch background task for capture
+                        let capture_task = tokio::spawn(Self::run_capture(
+                            active_capture,
+                            tx,
+                            interface_name
+                        ));
+                        
+                        // Launch background task for processing
+                        let process_task = tokio::spawn(async move {
+                            let parser = PacketParser::new();
+                            
+                            while let Some((data, timestamp)) = rx.recv().await {
+                                // Store the length before we move data
+                                let data_len = data.len();
+                                
+                                match parser.parse_packet(data, &config.interface.clone().unwrap_or_default()) {
+                                    Ok(mut packet) => {
+                                        // Update timestamp
+                                        packet.timestamp = timestamp;
+                                        
+                                        // Generate ID and store packet
+                                        let id = Self::generate_id(&packets);
+                                        packet.id = id;
+                                        
+                                        // Insert packet into storage
+                                        packets.insert(id, packet.clone());
+                                        
+                                        // Update stats
+                                        if let Ok(mut stats) = stats.try_lock() {
+                                            stats.total_packets += 1;
+                                            stats.total_bytes += data_len; // Use stored length
+                                            
+                                            // Update protocol stats
+                                            let protocol = packet.protocol.clone();
+                                            let protocol_count = stats.protocols.entry(protocol).or_insert(0);
+                                            *protocol_count += 1;
+                                            
+                                            // Update source stats
+                                            if let Some(source) = packet.source_ip.as_ref().map(|ip| ip.to_string()) {
+                                                let source_count = stats.sources.entry(source).or_insert(0);
+                                                *source_count += 1;
+                                            }
+                                            
+                                            // Update destination stats
+                                            if let Some(dest) = packet.destination_ip.as_ref().map(|ip| ip.to_string()) {
+                                                let dest_count = stats.destinations.entry(dest).or_insert(0);
+                                                *dest_count += 1;
+                                            }
+                                            
+                                            // Calculate packet rate
+                                            if let Some(start_time) = stats.start_time {
+                                                let elapsed = Utc::now().signed_duration_since(start_time);
+                                                let elapsed_secs = elapsed.num_milliseconds() as f64 / 1000.0;
+                                                if elapsed_secs > 0.0 {
+                                                    stats.packet_rate = stats.total_packets as f64 / elapsed_secs;
+                                                    stats.data_rate = stats.total_bytes as f64 / elapsed_secs;
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Enforce buffer size limit
+                                        Self::enforce_buffer_limit(&packets, config.buffer_size);
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to parse packet: {}", e);
+                                        if let Ok(mut stats) = stats.try_lock() {
+                                            stats.errors += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            info!("Packet processor task stopped");
+                        });
+                        
+                        // Save shared stats
+                        self.shared_stats = Some(stats_clone);
+                        
+                        // Save capture task handle
+                        self.capture_task = Some(capture_task);
+                        
+                        Ok(())
+                    },
+                    Err(e) => {
+                        error!("Failed to open capture: {}", e);
+                        Err(anyhow!("Failed to open capture: {}. Please run as administrator and ensure Npcap is properly installed.", e))
+                    }
+                }
+            },
+            Err(e) => {
+                error!("Failed to create capture from device: {}", e);
+                Err(anyhow!("Failed to create capture from device: {}. Please run as administrator and ensure Npcap is properly installed.", e))
+            }
+        }
     }
     
-    /// Run the packet capture loop
+    /// Run the capture loop in a background task
     async fn run_capture(
         mut capture: Capture<Active>, 
         tx: mpsc::Sender<(Vec<u8>, chrono::DateTime<Utc>)>,
         interface_name: String
     ) {
-        info!("Capture loop started on interface {}", interface_name);
+        info!("Starting capture loop for interface: {}", interface_name);
         
-        let mut packet_count = 0;
-        let start_time = Utc::now();
+        // Safety measures to handle potential crashes
+        // Set a retry counter to avoid infinite loops for transient errors
+        let mut consecutive_errors = 0;
+        let max_consecutive_errors = 5;
         
-        // Loop until the channel is closed
+        // Continue capturing packets until the channel is closed or an error occurs
         loop {
+            // Use match with additional safety checks
             match capture.next_packet() {
                 Ok(packet) => {
-                    // Get timestamp
+                    // Reset error counter on successful packet capture
+                    consecutive_errors = 0;
+                    
+                    // Safely access packet data with bounds checking
+                    if packet.data.is_empty() {
+                        warn!("Received empty packet, skipping");
+                        continue;
+                    }
+                    
+                    if packet.header.caplen as usize != packet.data.len() {
+                        warn!("Packet length mismatch: header says {} but data is {} bytes", 
+                            packet.header.caplen, packet.data.len());
+                        // Continue anyway but with extra caution
+                    }
+                    
+                    // Create a safe copy of the data with bounds checking
+                    let data = packet.data.to_vec();
+                    debug!("Captured packet: {} bytes", data.len());
+                    
+                    // Get the current timestamp
                     let timestamp = Utc::now();
                     
-                    // Clone the packet data
-                    let data = packet.data.to_vec();
-                    
-                    packet_count += 1;
-                    if packet_count % 10 == 0 {
-                        let elapsed = Utc::now().signed_duration_since(start_time);
-                        let seconds = elapsed.num_seconds() as f64;
-                        let rate = if seconds > 0.0 { packet_count as f64 / seconds } else { 0.0 };
-                        info!("Captured {} packets so far ({:.2} packets/sec)", 
-                             packet_count, rate);
+                    // Send the packet and timestamp to the processor
+                    match tx.send((data, timestamp)).await {
+                        Ok(_) => {
+                            // Successfully sent packet
+                            trace!("Sent packet of size {} bytes to processor", packet.data.len());
+                        },
+                        Err(e) => {
+                            error!("Failed to send packet to processor: {}", e);
+                            break;
+                        }
                     }
-                    
-                    info!("Captured packet: {} bytes", data.len());
-                    
-                    // Send the packet to the processor
-                    if tx.send((data, timestamp)).await.is_err() {
-                        error!("Failed to send packet to processor - channel closed");
-                        break;
-                    }
-                },
-                Err(pcap::Error::TimeoutExpired) => {
-                    // This is normal, just continue
-                    continue;
                 },
                 Err(e) => {
-                    error!("Error capturing packet: {}", e);
-                    break;
+                    // Check if it's a timeout (which is normal) or a real error
+                    if !e.to_string().contains("timed out") {
+                        error!("Error capturing packet: {}", e);
+                        
+                        // Increment error counter
+                        consecutive_errors += 1;
+                        
+                        // If we've had too many consecutive errors, break out of the loop
+                        if consecutive_errors >= max_consecutive_errors {
+                            error!("Too many consecutive errors ({}), stopping capture", consecutive_errors);
+                            break;
+                        }
+                        
+                        // Add a small delay to avoid hammering the system in case of persistent errors
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    } else {
+                        // Just a timeout, which is normal operation
+                        trace!("Packet capture timed out, continuing");
+                    }
                 }
             }
         }
         
-        info!("Capture loop ended on interface {}", interface_name);
+        info!("Capture loop stopped for interface: {}", interface_name);
     }
     
     /// Stop packet capture
@@ -429,5 +756,108 @@ impl CaptureManager {
                 debug!("Removed oldest packet ID {} to maintain buffer size", id);
             }
         }
+    }
+    
+    /// Set the interface to capture on
+    pub fn set_interface(&mut self, interface: String) {
+        self.config.interface = Some(interface);
+    }
+    
+    /// Set promiscuous mode
+    pub fn set_promiscuous(&mut self, promiscuous: bool) {
+        self.config.promiscuous = promiscuous;
+    }
+    
+    /// Set capture filter
+    pub fn set_filter(&mut self, filter: String) {
+        self.config.filter = Some(filter);
+    }
+    
+    /// Internal method to fetch interface information from various sources
+    fn fetch_interface_info(&self) -> Vec<InterfaceInfo> {
+        info!("Fetching network interface information");
+        
+        #[cfg(target_os = "windows")]
+        {
+            info!("Using Windows-specific interface detection");
+            // First try to use the PowerShell method which is most reliable
+            let interfaces = Self::get_windows_detailed_interfaces();
+            if !interfaces.is_empty() {
+                info!("PowerShell found {} detailed interfaces", interfaces.len());
+                return interfaces;
+            }
+            
+            // Fallback to pcap's Device::list which is more reliable than pnet_datalink on Windows
+            info!("PowerShell method failed, falling back to pcap Device::list");
+            match pcap::Device::list() {
+                Ok(devices) => {
+                    let interfaces = devices.into_iter().map(|dev| {
+                        InterfaceInfo::new(dev.name)
+                            .with_description(dev.desc.clone())
+                            .with_friendly_name(dev.desc)
+                    }).collect::<Vec<InterfaceInfo>>();
+                    
+                    info!("Found {} interfaces using pcap", interfaces.len());
+                    return interfaces;
+                },
+                Err(e) => {
+                    error!("Failed to get interfaces from pcap: {}", e);
+                    // Continue to the next method
+                }
+            }
+            
+            // Try the pnet_datalink interfaces as last resort on Windows
+            info!("Trying pnet_datalink interfaces as last resort");
+            match std::panic::catch_unwind(|| {
+                Self::get_pnet_interfaces()
+            }) {
+                Ok(interfaces) => {
+                    if !interfaces.is_empty() {
+                        info!("Found {} interfaces using pnet_datalink", interfaces.len());
+                        return interfaces;
+                    }
+                },
+                Err(_) => {
+                    error!("pnet_datalink panicked while listing interfaces");
+                }
+            }
+            
+            // Last resort: return an empty list
+            warn!("All interface detection methods failed. Using empty list.");
+            Vec::new()
+        }
+        
+        #[cfg(not(target_os = "windows"))]
+        {
+            // For non-Windows systems, use the pnet_datalink interfaces
+            Self::get_pnet_interfaces()
+        }
+    }
+    
+    /// Helper method to get interfaces from pnet_datalink
+    fn get_pnet_interfaces() -> Vec<InterfaceInfo> {
+        let pnet_interfaces = pnet_datalink::interfaces();
+        
+        // Convert pnet interfaces to our InterfaceInfo format
+        pnet_interfaces.into_iter().map(|iface| {
+            let mut info = InterfaceInfo::new(iface.name.clone());
+            
+            // Get the first IPv4 address
+            for ip in &iface.ips {
+                if let IpAddr::V4(ipv4) = ip.ip() {
+                    info.ipv4_address = Some(ipv4.to_string());
+                    break;
+                }
+            }
+            
+            // MAC address
+            info.mac_address = iface.mac.map(|mac| mac.to_string());
+            
+            // Interface flags
+            info.is_loopback = iface.is_loopback();
+            info.is_up = iface.is_up();
+            
+            info
+        }).collect()
     }
 } 

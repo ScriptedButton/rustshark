@@ -1,0 +1,6 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-L", "lib"]
+
+[env]
+# Set this to help pcap-sys find the Npcap SDK
+LIBPCAP_LIBDIR = { value = "lib", relative = true } 

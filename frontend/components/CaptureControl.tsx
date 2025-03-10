@@ -2,12 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import {
-  startCapture,
-  stopCapture,
-  getCaptureStatus,
-  getDiagnosticInfo,
-} from "@/lib/api";
+import { startCapture, stopCapture, getDiagnosticInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -18,13 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import {
-  AlertCircle,
-  Play,
-  Square,
-  RefreshCw,
-  AlertTriangle,
-} from "lucide-react";
+import { Play, Square, RefreshCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 export default function CaptureControl() {
@@ -59,7 +48,10 @@ export default function CaptureControl() {
   const handleStartCapture = async () => {
     try {
       setIsLoading(true);
-      const response = await startCapture();
+
+      // Pass the selected interface when starting capture
+      const response = await startCapture(interface_);
+
       toast.success(
         response.message || "Packet capture has been started successfully."
       );

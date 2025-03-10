@@ -10,7 +10,7 @@ export interface Interface {
 
 export interface CaptureStatus {
   is_running: boolean;
-  stats?: any;
+  stats?: CaptureStats | null;
 }
 
 export interface CaptureStats {
@@ -44,9 +44,24 @@ export interface Packet extends PacketSummary {
   destination_port?: number;
   source_mac?: string;
   destination_mac?: string;
-  headers: any;
+  headers: Record<string, unknown>;
   payload?: string;
-  metadata: any;
+  metadata: Record<string, unknown>;
+}
+
+export interface InterfaceInfo {
+  device_name: string;
+  friendly_name?: string;
+  description?: string;
+  ipv4_address?: string;
+  mac_address?: string;
+  is_loopback: boolean;
+  is_up: boolean;
+}
+
+export interface InterfacesResponse {
+  interfaces: string[];
+  detailed_interfaces: InterfaceInfo[];
 }
 
 export interface DiagnosticInfo {
@@ -54,6 +69,7 @@ export interface DiagnosticInfo {
   packet_count: number;
   stats: CaptureStats;
   interfaces: string[];
+  detailed_interfaces: InterfaceInfo[];
   selected_interface?: string;
   promiscuous_mode: boolean;
   filter?: string;
@@ -67,26 +83,39 @@ export interface PacketsResponse {
 }
 
 // API functions
-export async function getInterfaces(): Promise<string[]> {
+export const getInterfaces = async (): Promise<string[]> => {
   const response = await fetch(`${API_BASE_URL}/interfaces`);
   if (!response.ok) {
     throw new Error(`Failed to fetch interfaces: ${response.statusText}`);
   }
-  const data = await response.json();
+  const data = (await response.json()) as InterfacesResponse;
   return data.interfaces;
-}
+};
 
-export async function startCapture(): Promise<{
+export const getDetailedInterfaces = async (): Promise<InterfaceInfo[]> => {
+  const response = await fetch(`${API_BASE_URL}/interfaces`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch interfaces: ${response.statusText}`);
+  }
+  const data = (await response.json()) as InterfacesResponse;
+  return data.detailed_interfaces;
+};
+
+export async function startCapture(interfaceName?: string): Promise<{
   status: string;
   message: string;
 }> {
+  const requestBody = interfaceName ? { interface: interfaceName } : {};
+
   const response = await fetch(`${API_BASE_URL}/capture/start`, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(requestBody),
   });
-  if (!response.ok) {
-    throw new Error(`Failed to start capture: ${response.statusText}`);
-  }
-  return response.json();
+
+  return await response.json();
 }
 
 export async function stopCapture(): Promise<{

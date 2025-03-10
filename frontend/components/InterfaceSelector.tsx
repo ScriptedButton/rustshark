@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { getInterfaces } from "@/lib/api";
+import { getDetailedInterfaces, InterfaceInfo } from "@/lib/api";
 import {
   Select,
   SelectContent,
@@ -14,26 +14,26 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw } from "lucide-react";
 
 interface InterfaceSelectorProps {
-  selectedInterface?: string;
-  onSelectInterface: (value: string) => void;
+  selectedInterface: string | undefined;
+  onSelectInterface: (interfaceName: string) => void;
 }
 
 export default function InterfaceSelector({
   selectedInterface,
   onSelectInterface,
 }: InterfaceSelectorProps) {
-  const [interfaces, setInterfaces] = useState<string[]>([]);
+  const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const [loading, setLoading] = useState(false);
 
   const fetchInterfaces = async () => {
     try {
       setLoading(true);
-      const data = await getInterfaces();
+      const data = await getDetailedInterfaces();
       setInterfaces(data);
 
       // Auto-select the first interface if none is selected
       if (!selectedInterface && data.length > 0) {
-        onSelectInterface(data[0]);
+        onSelectInterface(data[0].device_name);
       }
     } catch (error) {
       console.error("Error fetching interfaces:", error);
@@ -45,6 +45,17 @@ export default function InterfaceSelector({
   useEffect(() => {
     fetchInterfaces();
   }, []);
+
+  // Helper function to format interface display names
+  const formatInterfaceName = (iface: InterfaceInfo): string => {
+    const name = iface.friendly_name || iface.device_name;
+
+    if (iface.ipv4_address) {
+      return `${name} (${iface.ipv4_address})`;
+    }
+
+    return name;
+  };
 
   return (
     <div className="space-y-2">
@@ -70,8 +81,8 @@ export default function InterfaceSelector({
         </SelectTrigger>
         <SelectContent>
           {interfaces.map((iface) => (
-            <SelectItem key={iface} value={iface}>
-              {iface}
+            <SelectItem key={iface.device_name} value={iface.device_name}>
+              {formatInterfaceName(iface)}
             </SelectItem>
           ))}
         </SelectContent>

@@ -48,3 +48,6 @@ rand = "0.8.5"
 
 # UUID generation
 uuid = { version = "1.4.1", features = ["v4"] }
+
+# Efficient locks
+parking_lot = "0.12.1"

@@ -3,14 +3,33 @@ use log::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use futures::future::FutureExt;
 
 use crate::capture::manager::CaptureManager;
 use crate::models::config::AppConfig;
+use crate::models::interface::InterfaceInfo;
+
+/// Request for starting capture
+#[derive(Deserialize)]
+pub struct StartCaptureRequest {
+    /// Interface to capture on
+    pub interface: Option<String>,
+    
+    /// Promiscuous mode
+    pub promiscuous: Option<bool>,
+    
+    /// Filter expression
+    pub filter: Option<String>,
+}
 
 /// Response for listing interfaces
 #[derive(Serialize)]
 struct InterfacesResponse {
+    /// Legacy array of interface names (for backward compatibility)
     interfaces: Vec<String>,
+    
+    /// Detailed interface information
+    detailed_interfaces: Vec<InterfaceInfo>,
 }
 
 /// Response for capture status
@@ -27,6 +46,7 @@ struct CaptureDiagnosticResponse {
     packet_count: usize,
     stats: serde_json::Value,
     interfaces: Vec<String>,
+    detailed_interfaces: Vec<InterfaceInfo>,
     selected_interface: Option<String>,
     promiscuous_mode: bool,
     filter: Option<String>,
@@ -38,16 +58,39 @@ pub async fn list_interfaces(
 ) -> impl Responder {
     let capture_manager = capture_manager.read().await;
     
+    // Basic interface listing
     let interfaces = capture_manager.list_interfaces();
     
-    HttpResponse::Ok().json(InterfacesResponse { interfaces })
+    // Detailed interface info
+    let detailed_interfaces = capture_manager.get_interface_info();
+    
+    HttpResponse::Ok().json(InterfacesResponse { 
+        interfaces,
+        detailed_interfaces
+    })
 }
 
 /// Start packet capture
 pub async fn start_capture(
     capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
+    request: Option<web::Json<StartCaptureRequest>>,
 ) -> impl Responder {
     let mut capture_manager = capture_manager.write().await;
+    
+    // Apply request parameters if provided
+    if let Some(req) = request {
+        if let Some(interface) = &req.interface {
+            capture_manager.set_interface(interface.clone());
+        }
+        
+        if let Some(promiscuous) = req.promiscuous {
+            capture_manager.set_promiscuous(promiscuous);
+        }
+        
+        if let Some(filter) = &req.filter {
+            capture_manager.set_filter(filter.clone());
+        }
+    }
     
     match capture_manager.start_capture().await {
         Ok(_) => {
@@ -116,14 +159,25 @@ pub async fn get_capture_diagnostic(
 ) -> impl Responder {
     let capture_manager = capture_manager.read().await;
     
+    // Get all diagnostic information
+    let is_running = capture_manager.get_status();
+    let packet_count = capture_manager.get_packet_count();
+    let stats = serde_json::to_value(&capture_manager.get_stats()).unwrap_or_default();
+    let interfaces = capture_manager.list_interfaces();
+    let detailed_interfaces = capture_manager.get_interface_info();
+    let selected_interface = capture_manager.get_selected_interface();
+    let promiscuous_mode = capture_manager.is_promiscuous();
+    let filter = capture_manager.get_filter();
+    
     let diagnostic = CaptureDiagnosticResponse {
-        is_running: capture_manager.get_status(),
-        packet_count: capture_manager.get_packet_count(),
-        stats: serde_json::to_value(&capture_manager.get_stats()).unwrap_or_default(),
-        interfaces: capture_manager.list_interfaces(),
-        selected_interface: capture_manager.get_selected_interface(),
-        promiscuous_mode: capture_manager.is_promiscuous(),
-        filter: capture_manager.get_filter(),
+        is_running,
+        packet_count,
+        stats,
+        interfaces,
+        detailed_interfaces,
+        selected_interface,
+        promiscuous_mode,
+        filter,
     };
     
     info!("Diagnostic information: running: {}, packet count: {}, interface: {:?}",
