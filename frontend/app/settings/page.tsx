@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { useToast } from "@/components/ui/use-toast";
+import { toast } from "sonner";
 import InterfaceSelector from "@/components/InterfaceSelector";
 
 export default function SettingsPage() {
@@ -22,15 +22,11 @@ export default function SettingsPage() {
   const [promiscuousMode, setPromiscuousMode] = useState(false);
   const [bufferSize, setBufferSize] = useState("1000");
   const [filter, setFilter] = useState("");
-  const { toast } = useToast();
 
   const handleSaveSettings = () => {
     // In a real implementation, we would save these settings to the backend
     // For now, we'll just show a toast message
-    toast({
-      title: "Settings Saved",
-      description: "Your capture settings have been saved.",
-    });
+    toast("Settings Saved");
   };
 
   return (

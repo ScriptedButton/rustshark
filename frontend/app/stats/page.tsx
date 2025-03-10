@@ -6,11 +6,6 @@ import StatsCard from "@/components/StatsCard";
 import ProtocolChart from "@/components/ProtocolChart";
 import { Metadata } from "next";
 
-export const metadata: Metadata = {
-  title: "RustShark - Statistics",
-  description: "View network capture statistics",
-};
-
 export default function StatsPage() {
   const [stats, setStats] = useState<CaptureStats | undefined>(undefined);
   const [loading, setLoading] = useState(true);

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::models::config::AppConfig;
 use crate::models::packet::{Packet, PacketSummary};
@@ -33,6 +33,9 @@ pub struct CaptureManager {
     
     /// Handle to background capture task
     capture_task: Option<JoinHandle<()>>,
+    
+    /// Shared statistics
+    shared_stats: Option<Arc<tokio::sync::Mutex<CaptureStats>>>,
 }
 
 impl CaptureManager {
@@ -45,6 +48,7 @@ impl CaptureManager {
             is_running: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             capture_task: None,
+            shared_stats: None,
         }
     }
     
@@ -106,6 +110,10 @@ impl CaptureManager {
         let packets = self.packets.clone();
         let config = self.config.clone();
         
+        // Create shared stats using Arc and Mutex for thread-safety
+        let stats = Arc::new(tokio::sync::Mutex::new(self.stats.clone()));
+        let stats_clone = stats.clone();
+        
         // Set running flag
         self.is_running.store(true, Ordering::SeqCst);
         
@@ -134,14 +142,44 @@ impl CaptureManager {
                              id, packet.length, packet.protocol);
                         
                         // Store the packet
-                        packets.insert(id, packet);
+                        packets.insert(id, packet.clone());
                         
-                        // Update statistics
-                        // (ideally this would be done in a more thread-safe way)
-                        // TODO: Implement proper statistics updating
+                        // Maintain buffer size limit by removing oldest packets if needed
+                        Self::enforce_buffer_limit(&packets, config.buffer_size);
+                        
+                        // Update statistics with a lock
+                        let mut stats = stats_clone.lock().await;
+                        stats.total_packets += 1;
+                        stats.total_bytes += raw_data.len();
+                        
+                        // Update protocol statistics
+                        let protocol = packet.protocol.clone();
+                        *stats.protocols.entry(protocol).or_insert(0) += 1;
+                        
+                        // Update source and destination statistics
+                        if let Some(src) = packet.source_ip {
+                            *stats.sources.entry(src.to_string()).or_insert(0) += 1;
+                        }
+                        
+                        if let Some(dst) = packet.destination_ip {
+                            *stats.destinations.entry(dst.to_string()).or_insert(0) += 1;
+                        }
+                        
+                        // Calculate rates
+                        if let Some(start) = stats.start_time {
+                            let elapsed = timestamp.signed_duration_since(start);
+                            let seconds = elapsed.num_seconds() as f64;
+                            if seconds > 0.0 {
+                                stats.packet_rate = stats.total_packets as f64 / seconds;
+                                stats.data_rate = stats.total_bytes as f64 / seconds;
+                            }
+                        }
                     },
                     Err(e) => {
                         error!("Failed to parse packet: {}", e);
+                        // Update error count
+                        let mut stats = stats_clone.lock().await;
+                        stats.errors += 1;
                     }
                 }
             }
@@ -149,6 +187,9 @@ impl CaptureManager {
         
         // Store the capture task handle
         self.capture_task = Some(capture_task);
+        
+        // Also store a reference to the shared stats
+        self.shared_stats = Some(stats);
         
         Ok(())
     }
@@ -214,6 +255,13 @@ impl CaptureManager {
         
         info!("Stopping packet capture");
         
+        // Copy the latest stats from shared_stats if available
+        if let Some(shared_stats) = &self.shared_stats {
+            if let Ok(stats) = shared_stats.try_lock() {
+                self.stats = stats.clone();
+            }
+        }
+        
         // Set running flag to false
         self.is_running.store(false, Ordering::SeqCst);
         
@@ -221,6 +269,9 @@ impl CaptureManager {
         if let Some(task) = self.capture_task.take() {
             task.abort();
         }
+        
+        // Clean up shared stats
+        self.shared_stats = None;
         
         // Update statistics
         self.stats.end_time = Some(Utc::now());
@@ -235,7 +286,17 @@ impl CaptureManager {
     
     /// Get capture statistics
     pub fn get_stats(&self) -> CaptureStats {
-        self.stats.clone()
+        // If we have shared stats (during active capture), use those
+        if let Some(shared_stats) = &self.shared_stats {
+            // Try to acquire the lock. If it fails, fall back to the last stored stats
+            match shared_stats.try_lock() {
+                Ok(stats) => stats.clone(),
+                Err(_) => self.stats.clone(),
+            }
+        } else {
+            // Otherwise, return the stored stats
+            self.stats.clone()
+        }
     }
     
     /// Get packet by ID
@@ -286,13 +347,9 @@ impl CaptureManager {
     
     /// Generate a packet ID
     fn generate_id(packets: &DashMap<u64, Packet>) -> u64 {
-        // In a real implementation, we'd use a more robust ID generation strategy
-        let id = rand::random::<u64>();
-        if packets.contains_key(&id) {
-            Self::generate_id(packets)
-        } else {
-            id
-        }
+        // Use an atomic counter for sequential IDs
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        NEXT_ID.fetch_add(1, Ordering::SeqCst)
     }
     
     /// Format source address
@@ -342,6 +399,35 @@ impl CaptureManager {
             "DNS" => "DNS Query/Response".to_string(),
             "ARP" => "ARP Request/Reply".to_string(),
             _ => format!("{} Packet", packet.protocol),
+        }
+    }
+    
+    /// Enforce the buffer size limit by removing oldest packets if needed
+    fn enforce_buffer_limit(packets: &DashMap<u64, Packet>, buffer_size: usize) {
+        // If we're within the limit, do nothing
+        if packets.len() <= buffer_size {
+            return;
+        }
+        
+        // Get all packet IDs sorted by timestamp (oldest first)
+        let mut packet_ids: Vec<(u64, DateTime<Utc>)> = packets
+            .iter()
+            .map(|p| (p.id, p.timestamp))
+            .collect();
+        
+        // Sort by timestamp (oldest first)
+        packet_ids.sort_by(|a, b| a.1.cmp(&b.1));
+        
+        // Calculate how many to remove
+        let to_remove = packets.len().saturating_sub(buffer_size);
+        
+        // Remove oldest packets
+        for i in 0..to_remove {
+            if i < packet_ids.len() {
+                let id = packet_ids[i].0;
+                packets.remove(&id);
+                debug!("Removed oldest packet ID {} to maintain buffer size", id);
+            }
         }
     }
 } 
