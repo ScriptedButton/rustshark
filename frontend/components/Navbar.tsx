@@ -82,7 +82,7 @@ export default function Navbar() {
           </NavigationMenuList>
         </NavigationMenu>
         <div className="ml-4">
-          <span className="text-sm text-muted-foreground">v0.1.0</span>
+          <span className="text-sm text-muted-foreground">v0.2.0</span>
         </div>
       </div>
     </header>

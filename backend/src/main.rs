@@ -10,6 +10,11 @@ use log::{info, warn};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use pcap::{Capture, Packet, Device};
+use std::io::{self, Read};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+use std::time::Duration;
 
 use crate::api::routes;
 use crate::capture::manager::CaptureManager;
@@ -46,10 +51,26 @@ struct Args {
     /// Enable Windows debugging mode - shows detailed networking information
     #[clap(long)]
     debug_windows: bool,
+    
+    /// Start with verbose logging enabled
+    #[clap(short, long)]
+    verbose: bool,
 }
 
 #[actix_web::main]
 async fn main() -> Result<()> {
+    // Parse command line arguments
+    let args = Args::parse();
+    
+    // Initialize logger with specified level
+    logging::init_logger(logging::get_log_level(&args.log_level));
+    
+    // Set initial verbose mode based on command line flag
+    logging::set_verbose_mode(args.verbose);
+    
+    // Start a background task to handle keyboard input
+    tokio::spawn(handle_keyboard_input());
+    
     // Check if running as administrator on Windows
     #[cfg(target_os = "windows")]
     {
@@ -66,20 +87,14 @@ async fn main() -> Result<()> {
             .unwrap_or(false);
             
         if !is_admin {
-            log::warn!("RustShark is not running with administrator privileges on Windows.");
-            log::warn!("Network capture functionality may be limited or fail completely.");
-            log::warn!("Right-click and select 'Run as administrator' for full functionality.");
+            warn!("RustShark is not running with administrator privileges on Windows.");
+            warn!("Network capture functionality may be limited or fail completely.");
+            warn!("Right-click and select 'Run as administrator' for full functionality.");
         } else {
-            log::info!("Running with administrator privileges");
+            info!("Running with administrator privileges");
         }
     }
 
-    // Parse command line arguments
-    let args = Args::parse();
-    
-    // Initialize logger with specified level
-    logging::init_logger(logging::get_log_level(&args.log_level));
-    
     info!("Starting RustShark v{}", env!("CARGO_PKG_VERSION"));
     
     // Run Windows-specific diagnostic checks
@@ -101,12 +116,15 @@ async fn main() -> Result<()> {
     let capture_manager = Arc::new(RwLock::new(CaptureManager::new(config.clone())));
 
     // We'll skip listing interfaces at startup and let the API handle it when needed
-    info!("Network interfaces will be detected when first requested");
+    info!("Network interfaces will be detected when requested");
     
     // Create a shared state for our application
     let app_state = web::Data::new(capture_manager.clone());
     
     info!("Starting RustShark API server on port {}", config.port);
+    
+    // Reset logging counters before starting the server
+    logging::reset_counters();
     
     // Start the HTTP server
     HttpServer::new(move || {
@@ -119,6 +137,57 @@ async fn main() -> Result<()> {
     .await?;
     
     Ok(())
+}
+
+/// Handle keyboard input in a background task
+async fn handle_keyboard_input() {
+    // Try to enable raw mode, but don't fail if it doesn't work
+    // This allows the program to run in environments without a terminal
+    if let Err(e) = enable_raw_mode() {
+        warn!("Could not enable terminal raw mode: {}", e);
+        return;
+    }
+    
+    loop {
+        // Add a small delay to avoid high CPU usage
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Poll for events with a small timeout
+        if crossterm::event::poll(Duration::from_millis(10)).unwrap_or(false) {
+            if let Ok(Event::Key(KeyEvent { code, modifiers, kind, .. })) = event::read() {
+                // Only process press events, ignore releases
+                if kind == KeyEventKind::Press {
+                    match code {
+                        // 'v' to toggle verbose mode
+                        KeyCode::Char('v') | KeyCode::Char('V') => {
+                            // Toggle verbose mode and get the new state
+                            let is_verbose = logging::toggle_verbose_mode();
+                            info!("Verbose mode {}", if is_verbose { "enabled" } else { "disabled" });
+                        },
+                        // 'q' or Ctrl+C for exit
+                        KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            info!("'q' pressed - to exit, use Ctrl+C instead");
+                        },
+                        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Allow the OS to handle Ctrl+C
+                            break;
+                        },
+                        // 'c' or 'C' to clear counters
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            logging::reset_counters();
+                            info!("Log counters reset");
+                        },
+                        _ => {
+                            // Ignore other keys
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Restore terminal
+    let _ = disable_raw_mode();
 }
 
 /// Run diagnostics to help troubleshoot Windows issues

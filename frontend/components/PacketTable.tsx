@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { getPackets, type PacketSummary } from "@/lib/api";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
+import { motion } from "framer-motion";
 
 interface PacketTableProps {
   initialData?: {
@@ -29,49 +30,89 @@ export default function PacketTable({ initialData }: PacketTableProps) {
   );
   const [total, setTotal] = useState(initialData?.total || 0);
   const [offset, setOffset] = useState(initialData?.offset || 0);
-  const [limit, setLimit] = useState(initialData?.limit || 50);
+  const [limit] = useState(initialData?.limit || 50);
   const [loading, setLoading] = useState(false);
+  const [isFetching, setIsFetching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const lastValidData = useRef({
+    packets: initialData?.packets || [],
+    total: initialData?.total || 0,
+  });
 
   const fetchPackets = async () => {
+    if (isFetching) return; // Prevent concurrent fetches
+
     try {
-      setLoading(true);
+      setIsFetching(true);
+      setError(null);
       const response = await getPackets(offset, limit);
-      setPackets(response.packets);
-      setTotal(response.total);
+
+      if (response && Array.isArray(response.packets)) {
+        setPackets(response.packets);
+        setTotal(response.total);
+        lastValidData.current = {
+          packets: response.packets,
+          total: response.total,
+        };
+      } else {
+        console.warn("Received invalid packet data:", response);
+        // Use last valid data
+        setPackets(lastValidData.current.packets);
+        setTotal(lastValidData.current.total);
+      }
     } catch (error) {
       console.error("Error fetching packets:", error);
+      setError("Failed to fetch packets. Please try again.");
+      // Keep using last valid data
+      setPackets(lastValidData.current.packets);
+      setTotal(lastValidData.current.total);
     } finally {
       setLoading(false);
+      setIsFetching(false);
     }
   };
 
   useEffect(() => {
     if (!initialData) {
+      setLoading(true);
       fetchPackets();
     }
+
+    // Set up auto-refresh on a timer
+    const interval = setInterval(() => {
+      if (!isFetching) {
+        fetchPackets();
+      }
+    }, 10000); // Refresh every 10 seconds
+
+    return () => clearInterval(interval);
   }, [offset, limit, initialData]);
 
   const handleRefresh = () => {
+    setLoading(true);
     fetchPackets();
   };
 
   const handlePrevPage = () => {
     setOffset(Math.max(offset - limit, 0));
+    setLoading(true);
   };
 
   const handleNextPage = () => {
     if (offset + limit < total) {
       setOffset(offset + limit);
+      setLoading(true);
     }
   };
 
   // Format timestamp to a readable format
   const formatTimestamp = (timestamp: string) => {
-    return new Date(timestamp).toLocaleString();
+    const date = new Date(timestamp);
+    return isNaN(date.getTime()) ? "Invalid date" : date.toLocaleString();
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 bg-card rounded-lg border shadow-sm p-4">
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-xl font-bold">Captured Packets</h2>
@@ -84,14 +125,22 @@ export default function PacketTable({ initialData }: PacketTableProps) {
           variant="outline"
           size="sm"
           onClick={handleRefresh}
-          disabled={loading}
+          disabled={loading || isFetching}
         >
-          <RefreshCw className="h-4 w-4 mr-2" />
+          <RefreshCw
+            className={`h-4 w-4 mr-2 ${isFetching ? "animate-spin" : ""}`}
+          />
           Refresh
         </Button>
       </div>
 
-      <div className="border rounded-md">
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-md mb-4">
+          {error}
+        </div>
+      )}
+
+      <div className="border rounded-md bg-card overflow-auto">
         <Table>
           <TableHeader>
             <TableRow>
@@ -107,7 +156,19 @@ export default function PacketTable({ initialData }: PacketTableProps) {
           <TableBody>
             {packets.length > 0 ? (
               packets.map((packet) => (
-                <TableRow key={packet.id}>
+                <motion.tr
+                  key={packet.id}
+                  initial={{
+                    opacity: 0,
+                    backgroundColor: "rgba(59, 130, 246, 0.1)",
+                  }}
+                  animate={{
+                    opacity: 1,
+                    backgroundColor: "rgba(255, 255, 255, 0)",
+                  }}
+                  transition={{ duration: 0.5 }}
+                  className="[&>td]:p-2 [&>td]:border-b"
+                >
                   <TableCell className="font-medium">
                     <Link
                       href={`/packets/${packet.id}`}
@@ -132,12 +193,19 @@ export default function PacketTable({ initialData }: PacketTableProps) {
                   <TableCell className="max-w-xs truncate">
                     {packet.info}
                   </TableCell>
-                </TableRow>
+                </motion.tr>
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={7} className="text-center py-6">
-                  {loading ? "Loading packets..." : "No packets captured yet."}
+                <TableCell colSpan={7} className="text-center py-10">
+                  {loading || isFetching ? (
+                    <div className="flex flex-col items-center">
+                      <RefreshCw className="h-6 w-6 text-primary animate-spin mb-3" />
+                      <p>Loading packets...</p>
+                    </div>
+                  ) : (
+                    <p>No packets captured yet.</p>
+                  )}
                 </TableCell>
               </TableRow>
             )}
@@ -155,7 +223,7 @@ export default function PacketTable({ initialData }: PacketTableProps) {
             variant="outline"
             size="sm"
             onClick={handlePrevPage}
-            disabled={offset === 0 || loading}
+            disabled={offset === 0 || loading || isFetching}
           >
             <ChevronLeft className="h-4 w-4 mr-1" />
             Previous
@@ -164,7 +232,7 @@ export default function PacketTable({ initialData }: PacketTableProps) {
             variant="outline"
             size="sm"
             onClick={handleNextPage}
-            disabled={offset + limit >= total || loading}
+            disabled={offset + limit >= total || loading || isFetching}
           >
             Next
             <ChevronRight className="h-4 w-4 ml-1" />

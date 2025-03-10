@@ -5,9 +5,15 @@ edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
 description = "A Wireshark-like network packet analyzer with REST API"
 
+[[bin]]
+name = "pcap_test"
+path = "src/bin/pcap_test.rs"
+
 [dependencies]
 # Network packet capture
 pcap = "2.2.0"
+pnet = "0.35.0"
+pnet_datalink = "0.35.0"
 
 # REST API framework
 actix-web = "4.4.0"
@@ -49,4 +55,15 @@ uuid = { version = "1.4.1", features = ["v4"] }
 
 # Efficient locks
 parking_lot = "0.12.1"
-pnet = "0.35.0"
+
+# Temporary files (for Windows helper)
+tempfile = "3.8.1"
+
+# Lazy static
+lazy_static = "1.5.0"
+
+# Terminal coloring for TUI-like output
+termcolor = "1.4.1"
+
+# Terminal input handling (cross-platform)
+crossterm = "0.28.1"

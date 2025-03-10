@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use log::{debug, error};
+use log::{debug, error, trace, log_enabled, Level};
 use pnet::packet::{
     ethernet::{EthernetPacket, EtherTypes},
     ip::{IpNextHeaderProtocol, IpNextHeaderProtocols},
@@ -28,6 +28,11 @@ impl PacketParser {
     
     /// Parse raw packet data into a Packet object
     pub fn parse_packet(&self, data: Vec<u8>, interface: &str) -> Result<Packet> {
+        // Only log in verbose mode
+        if log_enabled!(Level::Debug) {
+            debug!("Parsing packet from interface '{}', size: {} bytes", interface, data.len());
+        }
+        
         // Parse Ethernet frame
         let eth_packet = match EthernetPacket::new(&data) {
             Some(packet) => packet,
@@ -67,6 +72,13 @@ impl PacketParser {
             }
         });
         
+        // Only log in verbose mode  
+        if log_enabled!(Level::Trace) {
+            trace!("EtherType: {:?}, src: {}, dst: {}", 
+                   ethertype, packet.source_mac.as_ref().unwrap_or(&"?".to_string()), 
+                   packet.destination_mac.as_ref().unwrap_or(&"?".to_string()));
+        }
+        
         // Process based on EtherType
         match ethertype {
             EtherTypes::Ipv4 => {
@@ -99,33 +111,31 @@ impl PacketParser {
         packet.source_ip = Some(IpAddr::V4(ipv4_packet.get_source()));
         packet.destination_ip = Some(IpAddr::V4(ipv4_packet.get_destination()));
         
-        // Add IPv4 header to JSON
-        let mut headers = packet.headers.clone();
-        let ipv4_json = json!({
-            "version": ipv4_packet.get_version(),
-            "header_length": ipv4_packet.get_header_length(),
-            "dscp": ipv4_packet.get_dscp(),
-            "ecn": ipv4_packet.get_ecn(),
-            "total_length": ipv4_packet.get_total_length(),
-            "identification": ipv4_packet.get_identification(),
-            "flags": ipv4_packet.get_flags(),
-            "fragment_offset": ipv4_packet.get_fragment_offset(),
-            "ttl": ipv4_packet.get_ttl(),
-            "next_level_protocol": ipv4_packet.get_next_level_protocol().0,
-            "checksum": ipv4_packet.get_checksum(),
-            "source": packet.source_ip,
-            "destination": packet.destination_ip,
-        });
-        
-        if let Value::Object(ref mut obj) = headers {
-            obj.insert("ipv4".to_string(), ipv4_json);
-            packet.headers = Value::Object(obj.clone());
+        if log_enabled!(Level::Trace) {
+            trace!("IPv4 - src: {}, dst: {}, proto: {:?}", 
+                   ipv4_packet.get_source(), 
+                   ipv4_packet.get_destination(),
+                   ipv4_packet.get_next_level_protocol());
         }
         
-        // Process next protocol
-        self.parse_transport_protocol(ipv4_packet.get_next_level_protocol(), 
-                                     ipv4_packet.payload(), 
-                                     packet)
+        // Update headers in JSON
+        let mut headers = serde_json::from_value(packet.headers.clone()).unwrap_or_else(|_| serde_json::Map::new());
+        headers.insert("ipv4".to_string(), json!({
+            "version": ipv4_packet.get_version(),
+            "header_length": ipv4_packet.get_header_length(),
+            "total_length": ipv4_packet.get_total_length(),
+            "ttl": ipv4_packet.get_ttl(),
+            "protocol": format!("{:?}", ipv4_packet.get_next_level_protocol()),
+            "checksum": ipv4_packet.get_checksum(),
+            "source_ip": packet.source_ip,
+            "destination_ip": packet.destination_ip,
+        }));
+        packet.headers = serde_json::Value::Object(headers);
+        
+        // Parse transport layer
+        self.parse_transport_protocol(ipv4_packet.get_next_level_protocol(), ipv4_packet.payload(), packet)?;
+        
+        Ok(())
     }
     
     /// Parse IPv6 packet
@@ -198,8 +208,12 @@ impl PacketParser {
         Ok(())
     }
     
-    /// Parse transport layer protocol (TCP, UDP, ICMP)
+    /// Parse transport layer protocols
     fn parse_transport_protocol(&self, proto: IpNextHeaderProtocol, data: &[u8], packet: &mut Packet) -> Result<()> {
+        if log_enabled!(Level::Trace) {
+            trace!("Transport protocol: {:?}, data length: {}", proto, data.len());
+        }
+        
         match proto {
             IpNextHeaderProtocols::Tcp => {
                 self.parse_tcp(data, packet)?;
@@ -211,7 +225,7 @@ impl PacketParser {
                 self.parse_icmp(data, packet)?;
             },
             _ => {
-                packet.protocol = format!("IP Protocol {}", proto.0);
+                packet.protocol = format!("IP({:?})", proto);
                 packet.payload = Some(data.to_vec());
             }
         }
@@ -226,10 +240,17 @@ impl PacketParser {
             None => return Err(anyhow!("Failed to parse TCP packet")),
         };
         
-        // Set TCP specific fields
+        // Set TCP specific info
         packet.protocol = "TCP".to_string();
         packet.source_port = Some(tcp_packet.get_source());
         packet.destination_port = Some(tcp_packet.get_destination());
+        
+        if log_enabled!(Level::Trace) {
+            trace!("TCP - src port: {}, dst port: {}, payload: {} bytes", 
+                   tcp_packet.get_source(), 
+                   tcp_packet.get_destination(),
+                   tcp_packet.payload().len());
+        }
         
         // Add TCP header to JSON
         let mut headers = packet.headers.clone();

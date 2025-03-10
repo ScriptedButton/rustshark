@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { getPacketStats, type CaptureStats } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "lucide-react";
 import { AlertTriangle } from "lucide-react";
+import { motion } from "framer-motion";
 
 interface StatsCardProps {
   initialStats?: CaptureStats;
@@ -15,14 +16,33 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
   const [stats, setStats] = useState<CaptureStats | null>(initialStats || null);
   const [loading, setLoading] = useState(!initialStats);
   const [error, setError] = useState<string | null>(null);
+  const [isFetching, setIsFetching] = useState(false);
+  const lastValidStats = useRef<CaptureStats | null>(initialStats || null);
 
   const fetchStats = async () => {
+    if (isFetching) return; // Prevent concurrent fetches
+
     try {
-      setLoading(true);
+      setIsFetching(true);
       setError(null);
 
       const data = await getPacketStats();
-      setStats(data);
+
+      // Validate the received data
+      if (
+        data &&
+        typeof data === "object" &&
+        data.total_packets !== undefined
+      ) {
+        setStats(data);
+        lastValidStats.current = data;
+      } else {
+        console.warn("Received invalid stats data:", data);
+        // Keep using last valid stats
+        if (lastValidStats.current) {
+          setStats(lastValidStats.current);
+        }
+      }
     } catch (error) {
       console.error("Error fetching packet stats:", error);
 
@@ -37,8 +57,14 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
       } else {
         setError(errorMessage || "Failed to connect to backend");
       }
+
+      // Keep using last valid stats
+      if (lastValidStats.current) {
+        setStats(lastValidStats.current);
+      }
     } finally {
       setLoading(false);
+      setIsFetching(false);
     }
   };
 
@@ -47,15 +73,20 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
       fetchStats();
     }
 
-    // Set up polling
-    const interval = setInterval(fetchStats, 5000);
+    // Set up polling with safeguards
+    const interval = setInterval(() => {
+      if (!isFetching) {
+        fetchStats();
+      }
+    }, 5000);
+
     return () => clearInterval(interval);
   }, [initialStats]);
 
   if (error) {
     return (
-      <Card>
-        <CardHeader>
+      <Card className="shadow-md">
+        <CardHeader className="pt-3 pb-2">
           <CardTitle>Capture Statistics</CardTitle>
         </CardHeader>
         <CardContent>
@@ -69,8 +100,11 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
               onClick={() => {
                 fetchStats();
               }}
+              disabled={isFetching}
             >
-              <RefreshCw className="h-4 w-4 mr-2" />
+              <RefreshCw
+                className={`h-4 w-4 mr-2 ${isFetching ? "animate-spin" : ""}`}
+              />
               Retry Connection
             </Button>
             <p className="text-xs text-muted-foreground mt-4">
@@ -84,13 +118,16 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
 
   if (loading && !stats) {
     return (
-      <Card>
-        <CardHeader>
+      <Card className="shadow-md">
+        <CardHeader className="pt-3 pb-2">
           <CardTitle>Capture Statistics</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex justify-center items-center h-40">
-            <p>Loading statistics...</p>
+            <div className="flex flex-col items-center">
+              <RefreshCw className="h-8 w-8 text-primary animate-spin mb-3" />
+              <p className="text-muted-foreground">Loading statistics...</p>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -99,8 +136,8 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
 
   if (!stats) {
     return (
-      <Card>
-        <CardHeader>
+      <Card className="shadow-md">
+        <CardHeader className="pt-3 pb-2">
           <CardTitle>Capture Statistics</CardTitle>
         </CardHeader>
         <CardContent>
@@ -136,27 +173,35 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
   };
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+    <Card className="shadow-md">
+      <CardHeader className="flex flex-row items-center justify-between pt-3 pb-2">
         <CardTitle>Capture Statistics</CardTitle>
         <Button
           variant="ghost"
           size="sm"
           onClick={fetchStats}
-          disabled={loading}
+          disabled={isFetching}
         >
-          <RefreshCw className="h-4 w-4" />
+          <RefreshCw
+            className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`}
+          />
         </Button>
       </CardHeader>
       <CardContent>
-        <div className="grid gap-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="bg-slate-50 p-4 rounded-lg">
+        <motion.div
+          className="grid gap-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
+          initial={{ opacity: 0.9 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.3 }}
+          key={stats.total_packets + stats.total_bytes}
+        >
+          <div className="bg-slate-50 p-4 rounded-lg shadow-sm">
             <div className="text-sm font-medium text-muted-foreground">
               Packets
             </div>
             <div className="text-2xl font-bold mt-1">{stats.total_packets}</div>
           </div>
-          <div className="bg-slate-50 p-4 rounded-lg">
+          <div className="bg-slate-50 p-4 rounded-lg shadow-sm">
             <div className="text-sm font-medium text-muted-foreground">
               Data
             </div>
@@ -164,13 +209,13 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
               {formatBytes(stats.total_bytes)}
             </div>
           </div>
-          <div className="bg-slate-50 p-4 rounded-lg">
+          <div className="bg-slate-50 p-4 rounded-lg shadow-sm">
             <div className="text-sm font-medium text-muted-foreground">
               Duration
             </div>
             <div className="text-2xl font-bold mt-1">{formatDuration()}</div>
           </div>
-          <div className="bg-slate-50 p-4 rounded-lg">
+          <div className="bg-slate-50 p-4 rounded-lg shadow-sm">
             <div className="text-sm font-medium text-muted-foreground">
               Rate
             </div>
@@ -179,22 +224,24 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
               <span className="text-sm font-normal">pkt/s</span>
             </div>
           </div>
-        </div>
+        </motion.div>
 
         <div className="mt-6 space-y-6">
           <div>
             <h3 className="text-lg font-medium mb-2">Protocols</h3>
             <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
-              {Object.entries(stats.protocols).length > 0 ? (
-                Object.entries(stats.protocols).map(([protocol, count]) => (
-                  <div
-                    key={protocol}
-                    className="flex justify-between p-2 border rounded-md"
-                  >
-                    <span className="font-medium">{protocol}</span>
-                    <span>{count}</span>
-                  </div>
-                ))
+              {Object.entries(stats.protocols || {}).length > 0 ? (
+                Object.entries(stats.protocols || {}).map(
+                  ([protocol, count]) => (
+                    <div
+                      key={protocol}
+                      className="flex justify-between p-2 border rounded-md shadow-sm"
+                    >
+                      <span className="font-medium">{protocol}</span>
+                      <span>{count}</span>
+                    </div>
+                  )
+                )
               ) : (
                 <div className="col-span-full text-muted-foreground">
                   No protocol data available
@@ -206,13 +253,13 @@ export default function StatsCard({ initialStats }: StatsCardProps) {
           <div>
             <h3 className="text-lg font-medium mb-2">Timing</h3>
             <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
-              <div className="p-3 border rounded-md">
+              <div className="p-3 border rounded-md shadow-sm">
                 <span className="block text-sm text-muted-foreground">
                   Start Time
                 </span>
                 <span>{formatDate(stats.start_time)}</span>
               </div>
-              <div className="p-3 border rounded-md">
+              <div className="p-3 border rounded-md shadow-sm">
                 <span className="block text-sm text-muted-foreground">
                   End Time
                 </span>

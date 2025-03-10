@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse, Responder};
-use log::{info, error};
+use log::{info, error, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -72,18 +72,35 @@ struct CaptureDiagnosticResponse {
 pub async fn list_interfaces(
     capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
 ) -> impl Responder {
-    let capture_manager = capture_manager.read().await;
+    // Use a non-blocking async approach
+    let interfaces_future = async {
+        let capture_manager = capture_manager.read().await;
+        
+        // Basic interface listing
+        let interfaces = capture_manager.list_interfaces();
+        
+        // Detailed interface info
+        let detailed_interfaces = capture_manager.get_interface_info();
+        
+        (interfaces, detailed_interfaces)
+    };
     
-    // Basic interface listing
-    let interfaces = capture_manager.list_interfaces();
-    
-    // Detailed interface info
-    let detailed_interfaces = capture_manager.get_interface_info();
-    
-    HttpResponse::Ok().json(InterfacesResponse { 
-        interfaces,
-        detailed_interfaces
-    })
+    // Add a timeout to prevent blocking for too long
+    match tokio::time::timeout(std::time::Duration::from_secs(5), interfaces_future).await {
+        Ok((interfaces, detailed_interfaces)) => {
+            HttpResponse::Ok().json(InterfacesResponse { 
+                interfaces,
+                detailed_interfaces
+            })
+        },
+        Err(_) => {
+            // Timeout occurred
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "error",
+                "message": "Timeout while retrieving network interfaces"
+            }))
+        }
+    }
 }
 
 /// Start packet capture
@@ -91,41 +108,59 @@ pub async fn start_capture(
     capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
     request: Option<web::Json<StartCaptureRequest>>,
 ) -> impl Responder {
-    let mut capture_manager = capture_manager.write().await;
-    
-    // Apply request parameters if provided
-    if let Some(req) = request {
-        if let Some(interface) = &req.interface {
-            capture_manager.set_interface(interface.clone());
-        }
+    // Create a future to handle the start capture operation
+    let start_future = async {
+        let mut capture_manager = capture_manager.write().await;
         
-        if let Some(promiscuous) = req.promiscuous {
-            capture_manager.set_promiscuous(promiscuous);
+        // Apply request parameters if provided
+        if let Some(req) = request {
+            if let Some(interface) = &req.interface {
+                capture_manager.set_interface(interface.clone());
+            }
+            
+            if let Some(promiscuous) = req.promiscuous {
+                capture_manager.set_promiscuous(promiscuous);
+            }
+            
+            if let Some(filter) = &req.filter {
+                capture_manager.set_filter(filter.clone());
+            }
         }
-        
-        if let Some(filter) = &req.filter {
-            capture_manager.set_filter(filter.clone());
-        }
-    }
 
-    info!("Starting capture with interface: {:?}, promiscuous: {:?}, filter: {:?}",
-          capture_manager.get_selected_interface(),
-          capture_manager.is_promiscuous(),
-          capture_manager.get_filter());
+        info!("Starting capture with interface: {:?}, promiscuous: {:?}, filter: {:?}",
+              capture_manager.get_selected_interface(),
+              capture_manager.is_promiscuous(),
+              capture_manager.get_filter());
+        
+        capture_manager.start_capture().await
+    };
     
-    match capture_manager.start_capture().await {
-        Ok(_) => {
-            info!("Capture started successfully");
-            HttpResponse::Ok().json(serde_json::json!({
-                "status": "success",
-                "message": "Capture started successfully"
-            }))
+    // Execute with timeout to prevent hanging the server
+    match tokio::time::timeout(std::time::Duration::from_secs(10), start_future).await {
+        Ok(result) => {
+            match result {
+                Ok(_) => {
+                    info!("Capture started successfully");
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "status": "success",
+                        "message": "Capture started successfully"
+                    }))
+                },
+                Err(e) => {
+                    error!("Failed to start capture: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Failed to start capture: {}", e)
+                    }))
+                }
+            }
         },
-        Err(e) => {
-            error!("Failed to start capture: {}", e);
+        Err(_) => {
+            // Timeout occurred
+            error!("Timeout while starting capture");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "status": "error",
-                "message": format!("Failed to start capture: {}", e)
+                "message": "Timeout while starting capture - operation took too long"
             }))
         }
     }
@@ -135,21 +170,38 @@ pub async fn start_capture(
 pub async fn stop_capture(
     capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
 ) -> impl Responder {
-    let mut capture_manager = capture_manager.write().await;
+    // Create a future to handle the stop capture operation
+    let stop_future = async {
+        let mut capture_manager = capture_manager.write().await;
+        capture_manager.stop_capture().await
+    };
     
-    match capture_manager.stop_capture().await {
-        Ok(_) => {
-            info!("Capture stopped successfully");
-            HttpResponse::Ok().json(serde_json::json!({
-                "status": "success",
-                "message": "Capture stopped successfully"
-            }))
+    // Execute with timeout to prevent hanging the server
+    match tokio::time::timeout(std::time::Duration::from_secs(10), stop_future).await {
+        Ok(result) => {
+            match result {
+                Ok(_) => {
+                    info!("Capture stopped successfully");
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "status": "success",
+                        "message": "Capture stopped successfully"
+                    }))
+                },
+                Err(e) => {
+                    error!("Failed to stop capture: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Failed to stop capture: {}", e)
+                    }))
+                }
+            }
         },
-        Err(e) => {
-            error!("Failed to stop capture: {}", e);
+        Err(_) => {
+            // Timeout occurred
+            error!("Timeout while stopping capture");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "status": "error",
-                "message": format!("Failed to stop capture: {}", e)
+                "message": "Timeout while stopping capture - operation took too long"
             }))
         }
     }
@@ -159,52 +211,105 @@ pub async fn stop_capture(
 pub async fn get_capture_status(
     capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
 ) -> impl Responder {
-    let capture_manager = capture_manager.read().await;
-    
-    let is_running = capture_manager.get_status();
-    let stats = if is_running {
-        Some(serde_json::to_value(&capture_manager.get_stats()).unwrap_or_default())
-    } else {
-        None
+    // Use a non-blocking approach with timeout
+    let status_future = async {
+        // Use read lock with a timeout to avoid deadlocks
+        let capture_manager = capture_manager.read().await;
+        
+        let is_running = capture_manager.get_status();
+        let stats = if is_running {
+            Some(serde_json::to_value(&capture_manager.get_stats()).unwrap_or_default())
+        } else {
+            None
+        };
+        
+        CaptureStatusResponse {
+            is_running,
+            stats,
+        }
     };
     
-    HttpResponse::Ok().json(CaptureStatusResponse {
-        is_running,
-        stats,
-    })
+    // Execute with timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(3), status_future).await {
+        Ok(response) => {
+            HttpResponse::Ok().json(response)
+        },
+        Err(_) => {
+            // Timeout occurred
+            HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "status": "error",
+                "message": "Timeout while getting capture status"
+            }))
+        }
+    }
 }
 
 /// Get capture diagnostic information
 pub async fn get_capture_diagnostic(
     capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
 ) -> impl Responder {
-    let capture_manager = capture_manager.read().await;
-    
-    // Get all diagnostic information
-    let is_running = capture_manager.get_status();
-    let packet_count = capture_manager.get_packet_count();
-    let stats = serde_json::to_value(&capture_manager.get_stats()).unwrap_or_default();
-    let interfaces = capture_manager.list_interfaces();
-    let detailed_interfaces = capture_manager.get_interface_info();
-    let selected_interface = capture_manager.get_selected_interface();
-    let promiscuous_mode = capture_manager.is_promiscuous();
-    let filter = capture_manager.get_filter();
-    
-    let diagnostic = CaptureDiagnosticResponse {
-        is_running,
-        packet_count,
-        stats,
-        interfaces,
-        detailed_interfaces,
-        selected_interface,
-        promiscuous_mode,
-        filter,
+    // Use a non-blocking approach with timeout
+    let diagnostic_future = async {
+        // Use a read lock with a timeout to avoid deadlocks
+        let capture_manager = capture_manager.read().await;
+        
+        // Get all diagnostic information
+        let is_running = capture_manager.get_status();
+        let packet_count = capture_manager.get_packet_count();
+        let stats = serde_json::to_value(&capture_manager.get_stats()).unwrap_or_default();
+        
+        // Start a separate task for potentially slow interface operations
+        let interfaces_future = async {
+            let interfaces = capture_manager.list_interfaces();
+            let detailed_interfaces = capture_manager.get_interface_info();
+            (interfaces, detailed_interfaces)
+        };
+        
+        // Use a short timeout for interface operations
+        let (interfaces, detailed_interfaces) = match tokio::time::timeout(
+            std::time::Duration::from_secs(2), 
+            interfaces_future
+        ).await {
+            Ok(result) => result,
+            Err(_) => {
+                // On timeout, use empty values
+                warn!("Timeout while getting interface information");
+                (Vec::new(), Vec::new())
+            }
+        };
+        
+        let selected_interface = capture_manager.get_selected_interface();
+        let promiscuous_mode = capture_manager.is_promiscuous();
+        let filter = capture_manager.get_filter();
+        
+        CaptureDiagnosticResponse {
+            is_running,
+            packet_count,
+            stats,
+            interfaces,
+            detailed_interfaces,
+            selected_interface,
+            promiscuous_mode,
+            filter,
+        }
     };
     
-    info!("Diagnostic information: running: {}, packet count: {}, interface: {:?}",
-         diagnostic.is_running, diagnostic.packet_count, diagnostic.selected_interface);
-    
-    HttpResponse::Ok().json(diagnostic)
+    // Execute with timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(5), diagnostic_future).await {
+        Ok(diagnostic) => {
+            info!("Diagnostic information: running: {}, packet count: {}, interface: {:?}",
+                 diagnostic.is_running, diagnostic.packet_count, diagnostic.selected_interface);
+            
+            HttpResponse::Ok().json(diagnostic)
+        },
+        Err(_) => {
+            // Timeout occurred
+            HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "status": "error",
+                "message": "Timeout while getting diagnostic information"
+            }))
+        }
+    }
 }
 
 /// Update capture settings

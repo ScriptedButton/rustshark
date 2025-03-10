@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Card,
   CardContent,
@@ -16,7 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import InterfaceSelector from "@/components/InterfaceSelector";
-import { updateCaptureSettings } from "@/lib/api";
+import { updateCaptureSettings, getDiagnosticInfo } from "@/lib/api";
 
 export default function SettingsPage() {
   const [selectedInterface, setSelectedInterface] = useState<string>();
@@ -24,6 +24,37 @@ export default function SettingsPage() {
   const [bufferSize, setBufferSize] = useState("1000");
   const [filter, setFilter] = useState("");
   const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+
+  // Load current settings when the page loads
+  useEffect(() => {
+    const loadCurrentSettings = async () => {
+      try {
+        setInitializing(true);
+        const diagnostic = await getDiagnosticInfo();
+
+        // Update state with current settings from backend
+        if (diagnostic.selected_interface) {
+          setSelectedInterface(diagnostic.selected_interface);
+        }
+
+        setPromiscuousMode(diagnostic.promiscuous_mode);
+
+        if (diagnostic.filter) {
+          setFilter(diagnostic.filter);
+        }
+
+        // Buffer size isn't returned in diagnostics, but we could add it if needed
+      } catch (error) {
+        console.error("Error loading current settings:", error);
+        toast.error("Failed to load current settings");
+      } finally {
+        setInitializing(false);
+      }
+    };
+
+    loadCurrentSettings();
+  }, []);
 
   const handleSaveSettings = async () => {
     try {
@@ -114,7 +145,10 @@ export default function SettingsPage() {
             </CardContent>
 
             <CardFooter>
-              <Button onClick={handleSaveSettings} disabled={loading}>
+              <Button
+                onClick={handleSaveSettings}
+                disabled={loading || initializing}
+              >
                 {loading ? "Saving..." : "Save Settings"}
               </Button>
             </CardFooter>
