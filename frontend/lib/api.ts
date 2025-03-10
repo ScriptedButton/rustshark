@@ -218,3 +218,27 @@ export async function checkBackendHealth(): Promise<boolean> {
     return false;
   }
 }
+
+export async function updateCaptureSettings(settings: {
+  interface?: string;
+  promiscuous?: boolean;
+  filter?: string;
+  buffer_size?: number;
+}): Promise<{
+  status: string;
+  message: string;
+}> {
+  const response = await fetch(`${API_BASE_URL}/capture/settings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(settings),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to update settings: ${response.statusText}`);
+  }
+
+  return response.json();
+}

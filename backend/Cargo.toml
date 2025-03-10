@@ -7,9 +7,7 @@ description = "A Wireshark-like network packet analyzer with REST API"
 
 [dependencies]
 # Network packet capture
-pcap = "1.1.0"
-pnet = "0.34.0"
-pnet_datalink = "0.34.0"
+pcap = "2.2.0"
 
 # REST API framework
 actix-web = "4.4.0"
@@ -51,3 +49,4 @@ uuid = { version = "1.4.1", features = ["v4"] }
 
 # Efficient locks
 parking_lot = "0.12.1"
+pnet = "0.35.0"

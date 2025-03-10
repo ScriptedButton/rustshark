@@ -22,6 +22,22 @@ pub struct StartCaptureRequest {
     pub filter: Option<String>,
 }
 
+/// Request for updating capture settings
+#[derive(Deserialize)]
+pub struct UpdateSettingsRequest {
+    /// Interface to capture on
+    pub interface: Option<String>,
+    
+    /// Promiscuous mode
+    pub promiscuous: Option<bool>,
+    
+    /// Filter expression
+    pub filter: Option<String>,
+    
+    /// Buffer size
+    pub buffer_size: Option<usize>,
+}
+
 /// Response for listing interfaces
 #[derive(Serialize)]
 struct InterfacesResponse {
@@ -189,4 +205,41 @@ pub async fn get_capture_diagnostic(
          diagnostic.is_running, diagnostic.packet_count, diagnostic.selected_interface);
     
     HttpResponse::Ok().json(diagnostic)
+}
+
+/// Update capture settings
+pub async fn update_capture_settings(
+    capture_manager: web::Data<Arc<RwLock<CaptureManager>>>,
+    request: web::Json<UpdateSettingsRequest>,
+) -> impl Responder {
+    let mut capture_manager = capture_manager.write().await;
+    
+    // Update selected interface
+    if let Some(interface) = &request.interface {
+        info!("Setting interface to {}", interface);
+        capture_manager.set_interface(interface.clone());
+    }
+    
+    // Update promiscuous mode
+    if let Some(promiscuous) = request.promiscuous {
+        info!("Setting promiscuous mode to {}", promiscuous);
+        capture_manager.set_promiscuous(promiscuous);
+    }
+    
+    // Update filter
+    if let Some(filter) = &request.filter {
+        info!("Setting filter to {}", filter);
+        capture_manager.set_filter(filter.clone());
+    }
+    
+    // Update buffer size (if available in CaptureManager)
+    if let Some(buffer_size) = request.buffer_size {
+        info!("Setting buffer size to {}", buffer_size);
+        capture_manager.set_buffer_size(buffer_size);
+    }
+    
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "success",
+        "message": "Settings updated successfully"
+    }))
 } 

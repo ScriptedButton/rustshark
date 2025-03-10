@@ -16,17 +16,33 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import InterfaceSelector from "@/components/InterfaceSelector";
+import { updateCaptureSettings } from "@/lib/api";
 
 export default function SettingsPage() {
   const [selectedInterface, setSelectedInterface] = useState<string>();
   const [promiscuousMode, setPromiscuousMode] = useState(false);
   const [bufferSize, setBufferSize] = useState("1000");
   const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleSaveSettings = () => {
-    // In a real implementation, we would save these settings to the backend
-    // For now, we'll just show a toast message
-    toast("Settings Saved");
+  const handleSaveSettings = async () => {
+    try {
+      setLoading(true);
+      // Actually save the settings to the backend
+      await updateCaptureSettings({
+        interface: selectedInterface,
+        promiscuous: promiscuousMode,
+        filter: filter || undefined,
+        buffer_size: parseInt(bufferSize, 10),
+      });
+
+      toast.success("Settings saved successfully");
+    } catch (error) {
+      console.error("Error saving settings:", error);
+      toast.error("Failed to save settings");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -98,7 +114,9 @@ export default function SettingsPage() {
             </CardContent>
 
             <CardFooter>
-              <Button onClick={handleSaveSettings}>Save Settings</Button>
+              <Button onClick={handleSaveSettings} disabled={loading}>
+                {loading ? "Saving..." : "Save Settings"}
+              </Button>
             </CardFooter>
           </Card>
         </div>

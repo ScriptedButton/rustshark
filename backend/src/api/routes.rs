@@ -7,6 +7,7 @@ use crate::api::handlers::{
         stop_capture,
         get_capture_status,
         get_capture_diagnostic,
+        update_capture_settings,
     },
     packets::{
         get_packets,
@@ -116,6 +117,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         .route("/stop", web::post().to(stop_capture))
                         .route("/status", web::get().to(get_capture_status))
                         .route("/diagnostic", web::get().to(get_capture_diagnostic))
+                        .route("/settings", web::post().to(update_capture_settings))
                 )
                 // Packet data
                 .service(

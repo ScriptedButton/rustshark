@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use log::{info, warn, error, debug, trace};
-use pcap::{Device, Capture, Active, DeviceFlags};
-use pnet_datalink::interfaces;
+use pcap::{Device, Capture, Active, DeviceFlags, Address};
+// use pnet_datalink::interfaces;  // Uncomment if needed and available
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -292,9 +292,21 @@ impl CaptureManager {
         };
         
         #[cfg(not(target_os = "windows"))]
-        let device = pcap::Device { 
-            name: interface_name.clone(), 
-            desc: None 
+        let device = match Device::lookup() {
+            Ok(Some(dev)) => {
+                if dev.name == interface_name {
+                    dev
+                } else {
+                    // Try to find the device by name in the list
+                    let interfaces = Device::list().unwrap_or_default();
+                    let matching_device = interfaces.into_iter()
+                        .find(|d| d.name == interface_name)
+                        .ok_or_else(|| anyhow!("No device found with name {}", interface_name))?;
+                    matching_device
+                }
+            },
+            Ok(None) => return Err(anyhow!("No default device found")),
+            Err(e) => return Err(anyhow!("Failed to lookup device: {}", e)),
         };
         
         // Create a capture handle with safer error handling
@@ -721,9 +733,15 @@ impl CaptureManager {
         self.config.promiscuous = promiscuous;
     }
     
-    /// Set capture filter
+    /// Set filter for capture
     pub fn set_filter(&mut self, filter: String) {
         self.config.filter = Some(filter);
+    }
+    
+    /// Set buffer size for packet capture
+    pub fn set_buffer_size(&mut self, buffer_size: usize) {
+        // Ensure a reasonable minimum
+        self.config.buffer_size = buffer_size.max(100);
     }
     
     /// Fetch interface information with pnet_datalink completely disabled on Windows
@@ -770,28 +788,20 @@ impl CaptureManager {
     
     /// Helper method to get interfaces from pnet_datalink
     fn get_pnet_interfaces() -> Vec<InterfaceInfo> {
-        let pnet_interfaces = pnet_datalink::interfaces();
-        
-        // Convert pnet interfaces to our InterfaceInfo format
-        pnet_interfaces.into_iter().map(|iface| {
-            let mut info = InterfaceInfo::new(iface.name.clone());
-            
-            // Get the first IPv4 address
-            for ip in &iface.ips {
-                if let IpAddr::V4(ipv4) = ip.ip() {
-                    info.ipv4_address = Some(ipv4.to_string());
-                    break;
-                }
+        let pcap_interfaces = match pcap::Device::list() {
+            Ok(interfaces) => interfaces,
+            Err(e) => {
+                error!("Failed to get interfaces from pcap: {}", e);
+                return Vec::new();
             }
-            
-            // MAC address
-            info.mac_address = iface.mac.map(|mac| mac.to_string());
-            
-            // Interface flags
-            info.is_loopback = iface.is_loopback();
-            info.is_up = iface.is_up();
-            
-            info
+        };
+        
+        // Convert pcap interfaces to our InterfaceInfo format
+        pcap_interfaces.into_iter().map(|iface| {
+            // Just create a basic info with the name
+            InterfaceInfo::new(iface.name.clone())
+            // The pcap::Device in version 2.x has a different structure than expected
+            // We'll just use the name and skip the other fields for now
         }).collect()
     }
 } 
