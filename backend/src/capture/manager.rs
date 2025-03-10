@@ -65,36 +65,34 @@ impl CaptureManager {
         }
     }
     
-    /// A safer way to get interfaces that doesn't panic on Windows
-    fn get_interfaces_safe() -> Vec<String> {
-        // Try to get interfaces from pnet_datalink, but don't panic if it fails
-        match std::panic::catch_unwind(|| {
-            pnet_datalink::interfaces()
-                .into_iter()
-                .map(|i| i.name)
-                .collect::<Vec<String>>()
-        }) {
-            Ok(interfaces) => interfaces,
-            Err(_) => {
-                // Fallback to pcap's Device::list() which is more reliable on Windows
-                info!("Failed to get interfaces from pnet_datalink, falling back to pcap");
-                match pcap::Device::list() {
-                    Ok(devices) => devices.into_iter().map(|d| d.name).collect(),
-                    Err(e) => {
-                        error!("Failed to get interfaces from pcap: {}", e);
-                        Vec::new() // Return empty list as last resort
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Modify list_interfaces to use our safer method
+    /// List available network interfaces - bypassing problematic pnet_datalink on Windows
     pub fn list_interfaces(&self) -> Vec<String> {
         #[cfg(target_os = "windows")]
         {
-            info!("Using safe interface listing method on Windows");
-            Self::get_interfaces_safe()
+            // On Windows, completely bypass pnet_datalink and use our own methods
+            info!("Windows detected - using direct interface listing methods");
+            
+            // First try to get interfaces from Windows PowerShell which is most reliable
+            let win_interfaces = Self::get_windows_interfaces();
+            if !win_interfaces.is_empty() {
+                info!("Found {} interfaces using Windows PowerShell", win_interfaces.len());
+                return win_interfaces;
+            }
+            
+            // Fallback to pcap's Device::list which is also reliable on Windows
+            info!("PowerShell method failed, falling back to pcap Device::list");
+            match pcap::Device::list() {
+                Ok(devices) => {
+                    let device_names: Vec<String> = devices.into_iter().map(|d| d.name).collect();
+                    info!("Found {} interfaces using pcap", device_names.len());
+                    return device_names;
+                },
+                Err(e) => {
+                    error!("Failed to get interfaces from pcap: {}", e);
+                    // Return empty list as last resort
+                    return Vec::new();
+                }
+            }
         }
         
         #[cfg(not(target_os = "windows"))]
@@ -284,75 +282,30 @@ impl CaptureManager {
         
         info!("Starting capture on interface: {}", interface_name);
         
-        // First, try to find the device in the device list to get the fully configured device
-        info!("Attempting to find device in device list first");
-        let device_opt = match Device::list() {
-            Ok(devices) => {
-                // Find the matching device by name
-                let found_device = devices.into_iter()
-                    .find(|d| d.name == interface_name);
-                    
-                match found_device {
-                    Some(device) => {
-                        info!("Found device in device list: {}", device.name);
-                        Some(device)
-                    },
-                    None => {
-                        warn!("Device not found in device list, will create manually");
-                        None
-                    }
-                }
-            },
-            Err(e) => {
-                warn!("Failed to list devices: {}, will create device manually", e);
-                None
-            }
+        // Create a device object - different approach for Windows vs other platforms
+        #[cfg(target_os = "windows")]
+        let device = pcap::Device { 
+            name: interface_name.clone(), 
+            desc: None,
+            addresses: Vec::new(),
+            flags: DeviceFlags::empty()
         };
         
-        // If we couldn't find the device in the list, create it manually
-        let device = match device_opt {
-            Some(device) => {
-                info!("Using device from device list");
-                device
-            },
-            None => {
-                // Create a device manually as fallback
-                info!("Attempting to open device directly: {}", interface_name);
-                
-                // Create a device manually and try to open it directly
-                #[cfg(target_os = "windows")]
-                let device = pcap::Device { 
-                    name: interface_name.clone(), 
-                    desc: None,
-                    // These fields are only needed for newer versions of the pcap crate
-                    addresses: Vec::new(),
-                    flags: DeviceFlags::empty()
-                };
-                
-                // For non-Windows platforms, create a simpler device
-                #[cfg(not(target_os = "windows"))]
-                let device = pcap::Device { 
-                    name: interface_name.clone(), 
-                    desc: None 
-                };
-                
-                device
-            }
+        #[cfg(not(target_os = "windows"))]
+        let device = pcap::Device { 
+            name: interface_name.clone(), 
+            desc: None 
         };
         
-        // Create a capture handle with specific error handling
-        info!("Creating capture from device: {}", device.name);
+        // Create a capture handle with safer error handling
+        info!("Creating capture from device: {}", interface_name);
         let capture_result = Capture::from_device(device);
         
         match capture_result {
             Ok(mut capture) => {
                 info!("Successfully created capture from device");
                 
-                // Configure the capture with step-by-step debugging
-                // In pcap API, these methods return a new capture object directly
-                info!("Configuring capture - setting promiscuous mode: {}", self.config.promiscuous);
-                
-                // Need to handle each configuration step individually to track where the crash might be happening
+                // Configure the capture step-by-step for better debugging
                 info!("Setting promiscuous mode");
                 capture = capture.promisc(self.config.promiscuous);
                 info!("Promiscuous mode set successfully");
@@ -773,7 +726,7 @@ impl CaptureManager {
         self.config.filter = Some(filter);
     }
     
-    /// Internal method to fetch interface information from various sources
+    /// Fetch interface information with pnet_datalink completely disabled on Windows
     fn fetch_interface_info(&self) -> Vec<InterfaceInfo> {
         info!("Fetching network interface information");
         
@@ -802,29 +755,10 @@ impl CaptureManager {
                 },
                 Err(e) => {
                     error!("Failed to get interfaces from pcap: {}", e);
-                    // Continue to the next method
+                    // Last resort: return an empty list
+                    return Vec::new();
                 }
             }
-            
-            // Try the pnet_datalink interfaces as last resort on Windows
-            info!("Trying pnet_datalink interfaces as last resort");
-            match std::panic::catch_unwind(|| {
-                Self::get_pnet_interfaces()
-            }) {
-                Ok(interfaces) => {
-                    if !interfaces.is_empty() {
-                        info!("Found {} interfaces using pnet_datalink", interfaces.len());
-                        return interfaces;
-                    }
-                },
-                Err(_) => {
-                    error!("pnet_datalink panicked while listing interfaces");
-                }
-            }
-            
-            // Last resort: return an empty list
-            warn!("All interface detection methods failed. Using empty list.");
-            Vec::new()
         }
         
         #[cfg(not(target_os = "windows"))]

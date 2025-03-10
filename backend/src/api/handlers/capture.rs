@@ -91,6 +91,11 @@ pub async fn start_capture(
             capture_manager.set_filter(filter.clone());
         }
     }
+
+    info!("Starting capture with interface: {:?}, promiscuous: {:?}, filter: {:?}",
+          capture_manager.get_selected_interface(),
+          capture_manager.is_promiscuous(),
+          capture_manager.get_filter());
     
     match capture_manager.start_capture().await {
         Ok(_) => {

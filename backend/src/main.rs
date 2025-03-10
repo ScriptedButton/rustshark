@@ -10,7 +10,6 @@ use log::{info, warn};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use pnet::datalink::interfaces;
 
 use crate::api::routes;
 use crate::capture::manager::CaptureManager;
@@ -108,11 +107,6 @@ async fn main() -> Result<()> {
     let app_state = web::Data::new(capture_manager.clone());
     
     info!("Starting RustShark API server on port {}", config.port);
-
-    // list devices
-    for device in interfaces() {
-        println!("Found device! {:?}", device);
-    }
     
     // Start the HTTP server
     HttpServer::new(move || {
