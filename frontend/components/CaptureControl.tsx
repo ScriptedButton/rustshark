@@ -80,13 +80,62 @@ export function CaptureControl({ onStatusChange }: CaptureControlProps) {
     }
   }, [isLoading, onStatusChange]);
 
+  // Set up polling for packet count updates when running
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout | null = null;
+
+    // Start polling if capture is running
+    if (isRunning && !isLoading) {
+      intervalId = setInterval(() => {
+        // Request status updates via WebSocket if connected
+        if (isConnected) {
+          requestStatus();
+        } else {
+          // Fallback to HTTP API if WebSocket is not connected
+          fetchStatus();
+        }
+      }, 1000); // Poll every second
+    }
+
+    // Clean up interval on unmount or when capture stops
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [isRunning, isLoading, isConnected, fetchStatus, requestStatus]);
+
   // Start capture
   const handleStartCapture = async () => {
     try {
       setIsLoading(true);
       await api.startCapture(interface_);
+      // Update local state immediately
+      setIsRunning(true);
+      // Also update packet count if needed
+      setPacketCount(0); // Reset packet count for new capture
       setIsInitializing(false);
       toast.success("Capture started successfully");
+
+      // Request updated status multiple times to ensure we get updates
+      if (isConnected) {
+        // Immediately request status
+        requestStatus();
+
+        // Also schedule a follow-up status request after a short delay
+        // to ensure we get the latest packet count
+        setTimeout(() => {
+          requestStatus();
+        }, 500);
+      } else {
+        // If WebSocket isn't connected, use HTTP API
+        await fetchStatus();
+      }
+
+      // Notify parent component of status change
+      if (onStatusChange) {
+        onStatusChange(true);
+      }
     } catch (error) {
       console.error("Start capture error:", error);
       toast.error(
@@ -103,7 +152,29 @@ export function CaptureControl({ onStatusChange }: CaptureControlProps) {
     try {
       setIsLoading(true);
       await api.stopCapture();
+      // Update local state immediately
+      setIsRunning(false);
       toast.success("Capture stopped successfully");
+
+      // Request updated status multiple times to ensure we get updates
+      if (isConnected) {
+        // Immediately request status
+        requestStatus();
+
+        // Also schedule a follow-up status request after a short delay
+        // to ensure we get the final packet count
+        setTimeout(() => {
+          requestStatus();
+        }, 500);
+      } else {
+        // If WebSocket isn't connected, use HTTP API
+        await fetchStatus();
+      }
+
+      // Notify parent component of status change
+      if (onStatusChange) {
+        onStatusChange(false);
+      }
     } catch (error) {
       console.error("Stop capture error:", error);
       toast.error(

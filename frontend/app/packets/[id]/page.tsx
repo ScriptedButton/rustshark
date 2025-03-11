@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, useEffect, use, ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { getPacket, type Packet } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronLeft, RefreshCw } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { HexViewer } from "@/components/HexViewer";
 
 interface PacketPageProps {
   params: Promise<{
@@ -204,11 +205,83 @@ export default function PacketPage({ params }: PacketPageProps) {
         <TabsContent value="payload" className="p-4 border rounded-md mt-2">
           <h3 className="text-lg font-medium mb-4">Payload</h3>
           {packet.payload ? (
-            <div className="bg-muted p-4 rounded-md">
-              <pre className="text-sm overflow-auto max-h-[400px]">
-                {packet.payload}
-              </pre>
-            </div>
+            <Tabs defaultValue="hex" className="w-full">
+              <TabsList>
+                <TabsTrigger value="hex">Hex View</TabsTrigger>
+                <TabsTrigger value="raw">Raw View</TabsTrigger>
+                <TabsTrigger value="debug">Debug Info</TabsTrigger>
+              </TabsList>
+              <TabsContent value="hex" className="mt-4">
+                <SimpleErrorBoundary
+                  fallback={
+                    <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-md">
+                      <h4 className="font-medium mb-2">
+                        Error displaying hex view
+                      </h4>
+                      <p>
+                        The payload data format may not be compatible with the
+                        hex viewer.
+                      </p>
+                      <p className="text-sm mt-2">
+                        Please use the Raw View or Debug Info tab to examine the
+                        data.
+                      </p>
+                    </div>
+                  }
+                >
+                  <HexViewer data={packet.payload} />
+                </SimpleErrorBoundary>
+              </TabsContent>
+              <TabsContent value="raw" className="mt-4">
+                <div className="bg-muted p-4 rounded-md">
+                  <pre className="text-sm overflow-auto max-h-[400px]">
+                    {packet.payload}
+                  </pre>
+                </div>
+              </TabsContent>
+              <TabsContent value="debug" className="mt-4">
+                <div className="bg-muted p-4 rounded-md">
+                  <h4 className="font-medium mb-2">Payload Type:</h4>
+                  <p className="mb-4">{typeof packet.payload}</p>
+
+                  <h4 className="font-medium mb-2">Payload Length:</h4>
+                  <p className="mb-4">
+                    {(() => {
+                      const payload = packet.payload as unknown;
+                      if (typeof payload === "string") {
+                        return `${payload.length} characters`;
+                      } else if (Array.isArray(payload)) {
+                        return `${payload.length} items`;
+                      } else {
+                        return "Unknown";
+                      }
+                    })()}
+                  </p>
+
+                  <h4 className="font-medium mb-2">First 100 characters:</h4>
+                  <pre className="text-sm overflow-auto max-h-[100px] mb-4">
+                    {(() => {
+                      const payload = packet.payload as unknown;
+                      if (typeof payload === "string") {
+                        return (
+                          payload.substring(0, 100) +
+                          (payload.length > 100 ? "..." : "")
+                        );
+                      } else {
+                        return (
+                          JSON.stringify(payload).substring(0, 100) + "..."
+                        );
+                      }
+                    })()}
+                  </pre>
+
+                  <h4 className="font-medium mb-2">Full Data (JSON):</h4>
+                  <pre className="text-sm overflow-auto max-h-[200px]">
+                    {JSON.stringify(packet.payload, null, 2)}
+                  </pre>
+                </div>
+              </TabsContent>
+            </Tabs>
           ) : (
             <p className="text-muted-foreground">No payload data available.</p>
           )}
@@ -223,4 +296,33 @@ export default function PacketPage({ params }: PacketPageProps) {
       </Tabs>
     </main>
   );
+}
+
+// Simple error boundary component
+interface SimpleErrorBoundaryProps {
+  children: ReactNode;
+  fallback: ReactNode;
+}
+
+function SimpleErrorBoundary({ children, fallback }: SimpleErrorBoundaryProps) {
+  const [hasError, setHasError] = useState(false);
+
+  useEffect(() => {
+    const errorHandler = (event: ErrorEvent) => {
+      console.error("Error caught by ErrorBoundary:", event.error);
+      setHasError(true);
+    };
+
+    window.addEventListener("error", errorHandler);
+
+    return () => {
+      window.removeEventListener("error", errorHandler);
+    };
+  }, []);
+
+  if (hasError) {
+    return <>{fallback}</>;
+  }
+
+  return <>{children}</>;
 }
