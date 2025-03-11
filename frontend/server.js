@@ -25,6 +25,8 @@ function startRustBackend() {
     "cargo",
     [
       "run",
+      "--bin",
+      "rustshark",
       "--",
       "--port",
       BACKEND_PORT.toString(),
