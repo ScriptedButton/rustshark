@@ -181,18 +181,31 @@ export function CaptureControl({ onStatusChange }: CaptureControlProps) {
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">Capture Control</CardTitle>
           <Button
-            variant="outline"
-            size="sm"
+            variant="ghost"
+            size="icon"
             onClick={fetchStatus}
             disabled={isLoading || isInitializing}
+            className="h-8 w-8 flex-shrink-0"
+            title="Retry connection"
           >
             <RefreshCw
-              className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`}
+              className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`}
             />
-            Retry Connection
           </Button>
         </CardHeader>
         <CardContent>
+          {interface_ && (
+            <div className="mb-3 text-center">
+              <Badge
+                variant="outline"
+                className="text-xs py-1 px-2 max-w-full overflow-hidden text-ellipsis"
+              >
+                <span className="text-muted-foreground mr-1">Interface:</span>{" "}
+                {interface_}
+              </Badge>
+            </div>
+          )}
+
           <div className="flex flex-col items-center justify-center py-4">
             <AlertTriangle className="h-10 w-10 text-amber-500 mb-3" />
             <h3 className="text-lg font-medium text-center">{error}</h3>
@@ -208,27 +221,33 @@ export function CaptureControl({ onStatusChange }: CaptureControlProps) {
   return (
     <Card className="w-full">
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">
-          Capture Control
-          {interface_ && (
-            <Badge variant="outline" className="ml-2 text-xs">
-              {interface_}
-            </Badge>
-          )}
-        </CardTitle>
+        <div className="flex items-center">
+          <CardTitle className="text-sm font-medium">Capture Control</CardTitle>
+        </div>
         <Button
-          variant="outline"
-          size="sm"
+          variant="ghost"
+          size="icon"
           onClick={fetchStatus}
           disabled={isLoading || isInitializing}
+          className="h-8 w-8 flex-shrink-0"
+          title="Refresh status"
         >
-          <RefreshCw
-            className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`}
-          />
-          Refresh
+          <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
         </Button>
       </CardHeader>
       <CardContent>
+        {interface_ && (
+          <div className="mb-3 text-center">
+            <Badge
+              variant="outline"
+              className="text-xs py-1 px-2 max-w-full overflow-hidden text-ellipsis"
+            >
+              <span className="text-muted-foreground mr-1">Interface:</span>{" "}
+              {interface_}
+            </Badge>
+          </div>
+        )}
+
         <div className="text-center py-2">
           <div className="text-2xl font-bold">
             {isRunning ? (

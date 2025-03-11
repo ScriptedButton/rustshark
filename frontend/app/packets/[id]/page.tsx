@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, use } from "react";
 import { useRouter } from "next/navigation";
 import { getPacket, type Packet } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,13 +10,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 
 interface PacketPageProps {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 export default function PacketPage({ params }: PacketPageProps) {
-  const id = parseInt(params.id);
+  const { id } = use(params);
   const [packet, setPacket] = useState<Packet | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +26,7 @@ export default function PacketPage({ params }: PacketPageProps) {
     try {
       setLoading(true);
       setError(null);
-      const data = await getPacket(id);
+      const data = await getPacket(parseInt(id));
       setPacket(data);
     } catch (error) {
       console.error("Error fetching packet:", error);
