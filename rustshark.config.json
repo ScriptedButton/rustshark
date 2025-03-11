@@ -1,0 +1,14 @@
+{
+  "interface": null,
+  "frontend": {
+    "port": 3000
+  },
+  "backend": {
+    "port": 8080,
+    "autostart": true
+  },
+  "capture": {
+    "promiscuous": true,
+    "buffer_size": 10000
+  }
+}
