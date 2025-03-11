@@ -12,6 +12,7 @@ use std::process::Command;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use parking_lot::RwLock;
+use tokio::sync::broadcast;
 
 use crate::models::config::AppConfig;
 use crate::models::packet::{Packet, PacketSummary};
@@ -56,11 +57,23 @@ pub struct CaptureManager {
     
     /// Cache duration for interfaces (in seconds)
     interface_cache_duration: u64,
+    
+    /// Broadcast channel for statistics updates
+    stats_tx: broadcast::Sender<CaptureStats>,
+    
+    /// Last time stats were broadcast over WebSocket
+    last_stats_broadcast: RwLock<Instant>,
+    
+    /// Minimum interval between stats broadcasts (milliseconds)
+    stats_broadcast_interval_ms: u64,
 }
 
 impl CaptureManager {
     /// Create a new capture manager
     pub fn new(config: AppConfig) -> Self {
+        // Create a broadcast channel with capacity for 100 messages
+        let (stats_tx, _) = broadcast::channel(100);
+        
         Self {
             config,
             packets: Arc::new(DashMap::new()),
@@ -71,6 +84,9 @@ impl CaptureManager {
             shared_stats: None,
             cached_interfaces: RwLock::new(None),
             interface_cache_duration: 60, // Cache interface results for 60 seconds
+            stats_tx,
+            last_stats_broadcast: RwLock::new(Instant::now()),
+            stats_broadcast_interval_ms: 1000, // Default interval is 1 second
         }
     }
     
@@ -117,6 +133,27 @@ impl CaptureManager {
         if self.is_running.load(Ordering::SeqCst) {
             return Err(anyhow!("Capture is already running"));
         }
+        
+        // Ensure we have an interface selected
+        let interface = match &self.config.interface {
+            Some(iface) => iface.clone(),
+            None => return Err(anyhow!("No interface selected for capture"))
+        };
+        
+        info!("Starting packet capture on interface: {}", interface);
+        
+        // Reset any previous state
+        self.packets.clear();
+        self.stats = CaptureStats::default();
+        self.stats.start_time = Some(Utc::now());
+        self.stats.end_time = None;
+        
+        // Reset the broadcaster to ensure we start with a clean state
+        let (new_tx, _) = broadcast::channel(100);
+        self.stats_tx = new_tx;
+        
+        // Reset the stop flag
+        STOP_REQUESTED.store(false, Ordering::SeqCst);
         
         // Get interface from config or find default
         let interface_name = match &self.config.interface {
@@ -196,6 +233,7 @@ impl CaptureManager {
                     ));
                     
                     // Launch background task for processing
+        let stats_tx_clone = self.stats_tx.clone();
         let process_task = tokio::spawn(async move {
             let parser = PacketParser::new();
             
@@ -249,6 +287,9 @@ impl CaptureManager {
                                         
                                         // Update the packet count in the logger
                                         crate::utils::logging::update_packet_count(stats.total_packets);
+                                        
+                                        // Broadcast the updated stats (using cloned stats_tx)
+                                        let _ = stats_tx_clone.send(stats.clone());
                                     }
                                     
                                     // Enforce buffer size limit
@@ -314,6 +355,7 @@ impl CaptureManager {
                             });
                             
                             // Launch background task for processing
+                            let stats_tx_clone = self.stats_tx.clone();
                             let process_task = tokio::spawn(async move {
                                 let parser = PacketParser::new();
                                 
@@ -367,6 +409,9 @@ impl CaptureManager {
                                                 
                                                 // Update the packet count in the logger
                                                 crate::utils::logging::update_packet_count(stats.total_packets);
+                                                
+                                                // Broadcast the updated stats (using cloned stats_tx)
+                                                let _ = stats_tx_clone.send(stats.clone());
                                             }
                                             
                                             // Enforce buffer size limit
@@ -471,6 +516,7 @@ impl CaptureManager {
                             ));
                             
                             // Launch background task for processing
+                            let stats_tx_clone = self.stats_tx.clone();
                             let process_task = tokio::spawn(async move {
                                 let parser = PacketParser::new();
                                 
@@ -524,6 +570,9 @@ impl CaptureManager {
                                                 
                                                 // Update the packet count in the logger
                                                 crate::utils::logging::update_packet_count(stats.total_packets);
+                                                
+                                                // Broadcast the updated stats (using cloned stats_tx)
+                                                let _ = stats_tx_clone.send(stats.clone());
                                             }
                                             
                                             // Enforce buffer size limit
@@ -669,74 +718,63 @@ impl CaptureManager {
         info!("Capture task terminated for interface: {}", interface_name);
     }
     
-    /// Stop packet capture
+    /// Stop an active capture
     pub async fn stop_capture(&mut self) -> Result<()> {
-        // Check if capture is running
+        info!("Stopping packet capture");
+        
         if !self.is_running.load(Ordering::SeqCst) {
-            return Err(anyhow!("Capture is not running"));
+            return Err(anyhow!("No capture is currently running"));
         }
         
-        info!("Stopping capture gracefully");
+        // Set the flag to false first
+        self.is_running.store(false, Ordering::SeqCst);
         
-        // Send stop signal through the channel
-        let sent_signal = {
-            if let Ok(guard) = crate::capture::manager::STOP_SIGNAL.lock() {
-                if let Some(sender) = &*guard {
-                    match sender.send(()).await {
-                        Ok(_) => {
-                            info!("Sent stop signal to capture task");
-                            true
-                        },
-                        Err(e) => {
-                            warn!("Failed to send stop signal: {}", e);
-                            false
-                        }
-                    }
-                } else {
-                    warn!("No stop signal sender available");
-                    false
-                }
-            } else {
-                warn!("Failed to acquire lock on stop signal");
-                false
-            }
-        };
-        
-        // If we couldn't send the signal through the channel, use the direct approach
-        if !sent_signal {
-            info!("Using direct approach to stop capture");
-            // Set the flag directly
-            crate::capture::manager::STOP_REQUESTED.store(true, Ordering::SeqCst);
+        // Send stop signal if available
+        if let Some(sender) = STOP_SIGNAL.lock().unwrap().take() {
+            let _ = sender.send(()).await;
         }
         
-        // Wait for capture task to complete (with timeout)
+        // Set atomic flag for old capture method
+        STOP_REQUESTED.store(true, Ordering::SeqCst);
+        
+        // Wait for the task to complete
         if let Some(task) = self.capture_task.take() {
+            // Set timeout for joining the capture task
             match tokio::time::timeout(Duration::from_secs(5), task).await {
-                Ok(result) => {
-                    if let Err(e) = result {
-                        warn!("Capture task failed on shutdown: {}", e);
-                    } else {
-                        info!("Capture task completed gracefully");
-                    }
-                },
+                Ok(_) => {
+                    info!("Capture task completed gracefully");
+                }
                 Err(_) => {
-                    warn!("Capture task did not complete in time, force stopping");
-                    // We've lost control of the task, but at least we can update our state
+                    warn!("Timeout waiting for capture task to complete, proceeding anyway");
                 }
             }
         }
         
         // Update end time in stats
-        self.stats.end_time = Some(Utc::now());
+        if let Some(start_time) = self.stats.start_time {
+            self.stats.end_time = Some(Utc::now());
+            
+            // Calculate final rates
+            if let Some(end_time) = self.stats.end_time {
+                let elapsed = end_time.signed_duration_since(start_time);
+                let elapsed_secs = elapsed.num_milliseconds() as f64 / 1000.0;
+                if elapsed_secs > 0.0 {
+                    self.stats.packet_rate = self.stats.total_packets as f64 / elapsed_secs;
+                    self.stats.data_rate = self.stats.total_bytes as f64 / elapsed_secs;
+                }
+            }
+        }
         
-        // Reset running flag
-        self.is_running.store(false, Ordering::SeqCst);
+        // Send a final stats update with the capture stopped flag
+        let final_stats = self.stats.clone();
+        let _ = self.stats_tx.send(final_stats);
         
-        // Log a summary message with packet stats
-        info!("Capture stopped, collected {} packets over {:?}", 
-             self.stats.total_packets, 
-             self.stats.end_time.unwrap().signed_duration_since(self.stats.start_time.unwrap()));
+        // Reset the broadcaster to clean up any lingering broadcast tasks
+        // This ensures old capture data won't continue to be sent
+        let (new_tx, _) = broadcast::channel(100);
+        self.stats_tx = new_tx;
         
+        info!("Capture stopped successfully");
         Ok(())
     }
     
@@ -945,5 +983,32 @@ impl CaptureManager {
             
             info
         }).collect()
+    }
+    
+    /// Get a receiver for stats updates
+    pub fn subscribe_to_stats(&self) -> broadcast::Receiver<CaptureStats> {
+        self.stats_tx.subscribe()
+    }
+    
+    /// Broadcast stats with throttling to prevent flooding WebSocket connections
+    fn broadcast_stats_throttled(&self, stats: CaptureStats) {
+        // Check if enough time has passed since the last broadcast
+        let now = Instant::now();
+        let should_broadcast = {
+            let last_broadcast = self.last_stats_broadcast.read();
+            now.duration_since(*last_broadcast).as_millis() >= self.stats_broadcast_interval_ms as u128
+        };
+        
+        // Only broadcast if we've exceeded the minimum interval
+        if should_broadcast {
+            // Update the last broadcast time
+            *self.last_stats_broadcast.write() = now;
+            
+            // Send the stats update
+            let _ = self.stats_tx.send(stats);
+            trace!("Broadcasting stats update over WebSocket");
+        } else {
+            trace!("Skipping stats broadcast due to throttling");
+        }
     }
 } 

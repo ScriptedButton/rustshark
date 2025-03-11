@@ -4,6 +4,8 @@ import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 import Navbar from "@/components/Navbar";
 import { Toaster } from "@/components/ui/sonner";
+import { StatsProvider } from "@/lib/StatsContext";
+import { WebSocketProvider } from "@/lib/WebSocketContext";
 
 export const metadata: Metadata = {
   title: "RustShark - Network Packet Analyzer",
@@ -20,18 +22,23 @@ export default function RootLayout({
       <body
         className={`${GeistSans.variable} ${GeistMono.variable} antialiased`}
       >
-        <div className="flex flex-col min-h-screen">
-          <Navbar />
-          <div className="flex-1">{children}</div>
-          <footer className="py-6 border-t">
-            <div className="container mx-auto text-center text-sm text-muted-foreground">
-              <p>
-                &copy; {new Date().getFullYear()} RustShark. Powered by Rust.
-              </p>
+        <WebSocketProvider>
+          <StatsProvider>
+            <div className="flex flex-col min-h-screen">
+              <Navbar />
+              <div className="flex-1">{children}</div>
+              <footer className="py-6 border-t">
+                <div className="container mx-auto text-center text-sm text-muted-foreground">
+                  <p>
+                    &copy; {new Date().getFullYear()} RustShark. Powered by
+                    Rust.
+                  </p>
+                </div>
+              </footer>
             </div>
-          </footer>
-        </div>
-        <Toaster />
+            <Toaster />
+          </StatsProvider>
+        </WebSocketProvider>
       </body>
     </html>
   );

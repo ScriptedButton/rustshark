@@ -18,6 +18,8 @@ pnet_datalink = "0.35.0"
 # REST API framework
 actix-web = "4.4.0"
 actix-rt = "2.9.0"
+actix-ws = "0.3.0"
+futures-util = "0.3.28"
 
 # Serialization/deserialization
 serde = { version = "1.0.188", features = ["derive"] }

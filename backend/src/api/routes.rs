@@ -11,17 +11,11 @@ use crate::api::handlers::{
     },
     packets::{
         get_packets,
-        get_packet,
         get_packet_stats,
-        filter_packets,
-    },
-    filters::{
-        create_filter,
-        list_filters,
-        update_filter,
-        delete_filter,
+        get_packet,
     },
 };
+use crate::api::websocket::ws_index;
 
 /// Root endpoint to provide information about the API
 async fn index() -> impl Responder {
@@ -38,62 +32,47 @@ async fn index() -> impl Responder {
             {
                 "path": "/api/capture/start",
                 "method": "POST",
-                "description": "Start a capture session"
+                "description": "Start packet capture"
             },
             {
                 "path": "/api/capture/stop",
                 "method": "POST",
-                "description": "Stop the current capture"
+                "description": "Stop packet capture"
             },
             {
                 "path": "/api/capture/status",
                 "method": "GET",
-                "description": "Get status of the current capture"
+                "description": "Get status of the capture"
             },
             {
                 "path": "/api/capture/diagnostic",
                 "method": "GET",
-                "description": "Get diagnostic information about the capture process"
+                "description": "Get diagnostic info about the capture"
+            },
+            {
+                "path": "/api/capture/settings",
+                "method": "POST",
+                "description": "Update capture settings"
             },
             {
                 "path": "/api/packets",
                 "method": "GET",
-                "description": "List captured packets (with pagination)"
+                "description": "Get list of captured packets"
             },
             {
                 "path": "/api/packets/{id}",
                 "method": "GET",
-                "description": "Get detailed information about a specific packet"
+                "description": "Get details of a specific packet"
             },
             {
                 "path": "/api/packets/stats",
                 "method": "GET",
-                "description": "Get statistics about captured packets"
+                "description": "Get packet statistics"
             },
             {
-                "path": "/api/packets/filter",
+                "path": "/api/ws",
                 "method": "GET",
-                "description": "Get packets matching filter"
-            },
-            {
-                "path": "/api/filters",
-                "method": "POST",
-                "description": "Create a new filter"
-            },
-            {
-                "path": "/api/filters",
-                "method": "GET",
-                "description": "List available filters"
-            },
-            {
-                "path": "/api/filters/{id}",
-                "method": "PUT",
-                "description": "Update a filter"
-            },
-            {
-                "path": "/api/filters/{id}",
-                "method": "DELETE",
-                "description": "Delete a filter"
+                "description": "WebSocket endpoint for real-time updates"
             }
         ]
     }))
@@ -106,6 +85,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/", web::get().to(index))
         .service(
             web::scope("/api")
+                // WebSocket route for real-time updates
+                .route("/ws", web::get().to(ws_index))
+                
                 // Capture management
                 .service(
                     web::scope("/interfaces")
@@ -124,16 +106,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     web::scope("/packets")
                         .route("", web::get().to(get_packets))
                         .route("/stats", web::get().to(get_packet_stats))
-                        .route("/filter", web::get().to(filter_packets))
                         .route("/{id}", web::get().to(get_packet))
-                )
-                // Filters
-                .service(
-                    web::scope("/filters")
-                        .route("", web::post().to(create_filter))
-                        .route("", web::get().to(list_filters))
-                        .route("/{id}", web::put().to(update_filter))
-                        .route("/{id}", web::delete().to(delete_filter))
                 )
         );
 } 

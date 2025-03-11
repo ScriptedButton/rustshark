@@ -1,7 +1,7 @@
 "use client";
-import CaptureControl from "@/components/CaptureControl";
+import { CaptureControl } from "@/components/CaptureControl";
 import PacketTable from "@/components/PacketTable";
-import StatsCard from "@/components/StatsCard";
+import { StatsCard } from "@/components/StatsCard";
 import { motion } from "framer-motion";
 
 const containerVariants = {

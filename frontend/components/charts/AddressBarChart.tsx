@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect } from "react";
 import { CaptureStats } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -30,14 +29,6 @@ const COLORS = [
 ];
 
 export default function AddressBarChart({ stats }: AddressBarChartProps) {
-  // Debug stats object
-  useEffect(() => {
-    console.log("AddressBarChart stats:", {
-      sources: stats.sources,
-      destinations: stats.destinations,
-    });
-  }, [stats]);
-
   // Prepare source data
   const sourceData = Object.entries(stats.sources || {})
     .map(([name, value]) => ({ name, value }))
@@ -49,10 +40,6 @@ export default function AddressBarChart({ stats }: AddressBarChartProps) {
     .map(([name, value]) => ({ name, value }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 5); // Take top 5 destinations
-
-  // Log the processed data
-  console.log("Source data:", sourceData);
-  console.log("Destination data:", destData);
 
   // Create fallback data if empty
   const sourceDataWithFallback = sourceData.length > 0 ? sourceData : [];
