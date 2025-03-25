@@ -2,8 +2,6 @@
 
 A packet capture and analysis tool built with Rust and Next.js.
 
-![Rustshark Logo](https://via.placeholder.com/800x400/4285f4/ffffff?text=Rustshark)
-
 ## Overview
 
 Rustshark is a network packet capture and analysis tool that provides a modern web interface for capturing, analyzing, and visualizing network traffic. It combines the speed and efficiency of Rust for packet processing with the flexibility and ease of use of a web-based UI built with Next.js.
