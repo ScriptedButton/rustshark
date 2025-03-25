@@ -452,7 +452,9 @@ impl CaptureManager {
             // Create a device
             let device = pcap::Device { 
                 name: interface_name.clone(), 
-                desc: None 
+                desc: None,
+                addresses: Vec::new(),
+                flags: DeviceFlags::empty()
             };
             
             // Create a capture handle
