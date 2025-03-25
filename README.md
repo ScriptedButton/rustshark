@@ -29,7 +29,7 @@ Rustshark is a network packet capture and analysis tool that provides a modern w
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/yourusername/rustshark.git
+   git clone https://github.com/ScriptedButton/rustshark.git
    cd rustshark
    ```
 
